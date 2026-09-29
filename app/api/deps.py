@@ -18,7 +18,8 @@ from app.core.config import Settings, get_settings
 from app.core.errors import ForbiddenError, UnauthorizedError
 from app.core.security import decode_access_token
 from app.db.client import get_database
-from app.models.enums import Role
+from app.models.enums import Role, UserStatus
+from app.services.auth import is_token_revoked
 
 # auto_error=False so a missing header raises our own envelope, not Starlette's.
 bearer_scheme = HTTPBearer(auto_error=False, description="JWT access token")
@@ -31,6 +32,8 @@ class CurrentUser:
     id: str
     role: Role
     email: str | None = None
+    name: str | None = None
+    status: UserStatus = UserStatus.ACTIVE
     facility_ids: frozenset[str] = frozenset()
 
     def has_facility_access(self, facility_id: str) -> bool:
@@ -40,12 +43,22 @@ class CurrentUser:
         return facility_id in self.facility_ids
 
 
+class TokenRevokedError(UnauthorizedError):
+    code = "TOKEN_REVOKED"
+
+
 async def get_current_user(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: Annotated[AsyncDatabase, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CurrentUser:
-    """Decode the Bearer token into a `CurrentUser`."""
+    """Decode the Bearer token into a `CurrentUser`.
+
+    The JWT signature alone cannot express "logged out", so a token that was
+    revoked through `POST /auth/logout` is rejected here too. That costs one
+    indexed lookup on the `revokedTokens._id` primary key per request.
+    """
     if credentials is None or not credentials.credentials:
         raise UnauthorizedError("Authorization header with a Bearer token is required")
 
@@ -61,6 +74,16 @@ async def get_current_user(
     except ValueError as exc:
         raise UnauthorizedError(f"Unknown role '{raw_role}'") from exc
 
+    jti = payload.get("jti")
+    if jti and await is_token_revoked(db, str(jti)):
+        raise TokenRevokedError("This session has been signed out. Please log in again.")
+
+    raw_status = payload.get("status") or UserStatus.ACTIVE
+    try:
+        status = UserStatus(raw_status)
+    except ValueError:
+        status = UserStatus.ACTIVE
+
     facility_ids = payload.get("facilityIds") or []
 
     # Kept on the request so WebSocket endpoints can read the same principal.
@@ -70,6 +93,8 @@ async def get_current_user(
         id=subject,
         role=role,
         email=payload.get("email"),
+        name=payload.get("name"),
+        status=status,
         facility_ids=frozenset(facility_ids),
     )
 

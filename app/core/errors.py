@@ -36,6 +36,8 @@ class ErrorCode:
     CONFLICT = "CONFLICT"
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
     DUPLICATE_KEY = "DUPLICATE_KEY"
+    RATE_LIMITED = "RATE_LIMITED"
+    DATABASE_UNAVAILABLE = "DATABASE_UNAVAILABLE"
     DATABASE_ERROR = "DATABASE_ERROR"
 
 
@@ -93,6 +95,29 @@ def _envelope(code: str, message: str, details: Any = None) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, "details": details}}
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursively coerce `value` into something `json.dumps` accepts.
+
+    Pydantic puts the original exception object into a failed validator's `ctx`,
+    so `exc.errors()` is not JSON-serialisable whenever a custom validator
+    raises. Rendering the envelope with the raw errors turns a 422 into a 500.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, BaseException):
+        return str(value) or value.__class__.__name__
+    return str(value)
+
+
+def _safe_validation_errors(exc: RequestValidationError) -> list[Any]:
+    """`exc.errors()` with every non-JSON-native value coerced to text."""
+    return [_json_safe(item) for item in exc.errors()]
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Attach all ParkEasy exception handlers to the application."""
 
@@ -106,11 +131,11 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def _validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             content=_envelope(
                 ErrorCode.VALIDATION_ERROR,
                 "Request validation failed",
-                exc.errors(),
+                _safe_validation_errors(exc),
             ),
         )
 
@@ -121,6 +146,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             403: ErrorCode.FORBIDDEN,
             404: ErrorCode.NOT_FOUND,
             405: ErrorCode.NOT_FOUND,
+            429: ErrorCode.RATE_LIMITED,
         }.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
         return JSONResponse(
             status_code=exc.status_code,

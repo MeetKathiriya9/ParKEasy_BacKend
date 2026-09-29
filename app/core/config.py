@@ -12,6 +12,8 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.models.enums import Role
+
 Environment = Literal["development", "test", "production"]
 
 
@@ -42,9 +44,16 @@ class Settings(BaseSettings):
     jwt_expires_minutes: int = 60
     jwt_issuer: str = "parkeasy"
 
+    self_register_roles: Annotated[list[Role], NoDecode] = Field(
+        default_factory=lambda: [Role.DRIVER, Role.STAFF, Role.OPERATOR, Role.ADMIN]
+    )
+
+    login_rate_limit: int = 10
+    login_rate_window_seconds: int = 60
+    register_rate_limit: int = 5
+    register_rate_window_seconds: int = 3600
+
     # --- CORS ---
-    # `NoDecode` stops pydantic-settings from trying to JSON-parse this field, so
-    # .env may use the friendlier `A,B,C` form instead of `["A","B"]`.
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
@@ -65,6 +74,21 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    @field_validator("self_register_roles", mode="before")
+    @classmethod
+    def _parse_self_register_roles(cls, value: object) -> object:
+        """Accept `driver,admin` from .env; reject unknown role names loudly."""
+        if isinstance(value, str):
+            roles = [item.strip().lower() for item in value.split(",") if item.strip()]
+            try:
+                return [Role(item) for item in roles]
+            except ValueError as exc:
+                valid = ", ".join(r.value for r in Role)
+                raise ValueError(
+                    f"Unknown role in SELF_REGISTER_ROLES: {exc}. Valid roles: {valid}"
+                ) from exc
+        return value
+
     @field_validator("log_level")
     @classmethod
     def _upper_log_level(cls, value: str) -> str:
@@ -77,6 +101,14 @@ class Settings(BaseSettings):
     @property
     def jwt_expire_seconds(self) -> int:
         return self.jwt_expires_minutes * 60
+
+    def can_self_register(self, role: Role) -> bool:
+        return role in self.self_register_roles
+
+    @property
+    def privileged_self_registration_allowed(self) -> bool:
+        """True when public registration can mint an operator or admin."""
+        return bool({Role.OPERATOR, Role.ADMIN} & set(self.self_register_roles))
 
 
 @lru_cache(maxsize=1)

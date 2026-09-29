@@ -28,3 +28,5 @@ logs/
 *.log
 *.pid
 uploads/
+
+tests/

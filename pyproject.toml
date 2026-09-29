@@ -26,6 +26,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
+# The requirements document specifies a camelCase wire format for API payloads
+# (`accessToken`, `facilityIds`, `createdAt`, ...), so response schemas mirror
+# that naming on purpose rather than renaming to snake_case.
+"app/schemas/*.py" = ["N815"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

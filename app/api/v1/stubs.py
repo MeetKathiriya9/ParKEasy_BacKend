@@ -31,6 +31,9 @@ class RouteGroupSpec:
     name: str
     summary: str
     operations: tuple[str, ...] = field(default_factory=tuple)
+    # True once a real router module implements the group; such groups are kept
+    # here for documentation but no longer get a 501 stub.
+    implemented: bool = False
 
 
 # DOC section 21 - "Example API Structure", in document order.
@@ -46,6 +49,9 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
             "POST /forgot-password",
             "POST /reset-password",
         ),
+        # register/login/logout/me live in app/api/v1/auth.py; password reset
+        # is still outstanding.
+        implemented=True,
     ),
     RouteGroupSpec("users", "Profile, preferences and account status", ("GET /me", "PATCH /me")),
     RouteGroupSpec(
@@ -159,8 +165,8 @@ def _build_router(spec: RouteGroupSpec) -> APIRouter:
 
 
 def build_stub_routers() -> list[APIRouter]:
-    """Return one stub router per planned route group."""
-    return [_build_router(spec) for spec in ROUTE_GROUPS]
+    """Return one stub router per planned route group that is not implemented yet."""
+    return [_build_router(spec) for spec in ROUTE_GROUPS if not spec.implemented]
 
 
 __all__ = ["ROUTE_GROUPS", "RouteGroupSpec", "build_stub_routers"]

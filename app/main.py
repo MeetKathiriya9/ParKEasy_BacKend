@@ -36,11 +36,14 @@ parking operations.
 Built from the *ParkEasy Web Client Requirement and Project Plan* v1.0
 (sections 7, 17, 18, 19, 21, 24, 26).
 
-**Phase 1 (current):** foundation only - health probes, MongoDB connectivity
-and indexes, error envelope, CORS, and the documented route-group surface.
-Business endpoints return `501` until their phase lands.
+**Phase 1 (current):** foundation plus authentication - health probes,
+MongoDB connectivity and indexes, error envelope, CORS, the live occupancy
+WebSocket, and `register` / `login` / `me` / `logout` for all four roles.
+Remaining business endpoints return `501` until their phase lands.
 
-**Auth:** `Authorization: Bearer <access token>` on protected routes.
+**Auth:** `Authorization: Bearer <access token>` on protected routes. Register
+with any of `driver`, `staff`, `operator`, `admin`; which roles are accepted is
+governed by the `SELF_REGISTER_ROLES` setting.
 """
 
 TAGS_METADATA = [
@@ -75,6 +78,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level)
 
     logger.info("Starting %s v%s (%s)", settings.app_name, settings.version, settings.environment)
+    _warn_on_permissive_registration(settings)
     try:
         app.state.db = await connect_to_mongo(settings)
         await ensure_indexes(app.state.db)
@@ -88,6 +92,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await close_mongo_connection()
         logger.info("Shutdown complete")
+
+
+def _warn_on_permissive_registration(settings: Settings) -> None:
+    """Make the open-admin-registration risk impossible to miss at boot."""
+    if not settings.privileged_self_registration_allowed:
+        return
+
+    allowed = ", ".join(sorted(r.value for r in settings.self_register_roles))
+    message = (
+        f"SECURITY: SELF_REGISTER_ROLES={allowed} -- anyone reaching this API can "
+        "create an operator or admin account. Fine for local development; set "
+        "SELF_REGISTER_ROLES=driver before deploying."
+    )
+    if settings.is_production:
+        logger.critical(message)
+    else:
+        logger.warning(message)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

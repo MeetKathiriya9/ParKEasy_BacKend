@@ -28,7 +28,10 @@ _database: AsyncDatabase | None = None
 
 
 class DatabaseUnavailableError(AppError):
-    code = ErrorCode.DATABASE_ERROR
+    """Raised when MongoDB is unreachable, i.e. the API is running degraded."""
+
+    code = ErrorCode.DATABASE_UNAVAILABLE
+    status_code = 503
 
 
 async def connect_to_mongo(settings: Settings) -> AsyncDatabase:

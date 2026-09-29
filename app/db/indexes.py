@@ -132,6 +132,11 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
         IndexModel([("actorId", ASCENDING), ("timestamp", DESCENDING)], name="actor_ts_1"),
         IndexModel([("entity", ASCENDING), ("timestamp", DESCENDING)], name="entity_ts_1"),
     ],
+
+    "revokedTokens": [
+        IndexModel([("exp", ASCENDING)], expireAfterSeconds=0, name="ttl_exp"),
+        IndexModel([("userId", ASCENDING)], name="userId_1"),
+    ],
 }
 
 
