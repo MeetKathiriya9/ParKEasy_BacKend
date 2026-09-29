@@ -1,0 +1,16 @@
+# ParkEasy API - development and test dependencies
+#
+#   .venv\Scripts\python -m pip install -r requirements-dev.txt
+#
+# Installs the runtime requirements too, so a fresh environment only needs this
+# one command.
+
+-r requirements.txt
+
+# --- Testing ---
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
+
+# --- Linting & formatting ---
+ruff==0.16.9

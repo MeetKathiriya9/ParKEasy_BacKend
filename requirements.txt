@@ -1,0 +1,27 @@
+# ParkEasy API - runtime dependencies
+# Python 3.14 (cp314 wheels verified)
+#
+#   py -3.14 -m venv .venv
+#   .venv\Scripts\python -m pip install -r requirements.txt
+#
+# NOTE: `passlib` is deliberately excluded - 1.7.4 is incompatible with
+#       bcrypt 5.x. Password hashing uses the `bcrypt` library directly.
+# NOTE: `motor` is deliberately excluded - it is deprecated and its async
+#       driver has been merged into PyMongo (`pymongo.AsyncMongoClient`).
+
+# --- Web framework ---
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+
+# --- Database ---
+pymongo==4.18.2
+
+# --- Config & validation ---
+pydantic==2.13.5
+pydantic-settings==2.15.0
+email-validator==2.3.0
+
+# --- Auth ---
+PyJWT==2.15.0
+bcrypt==5.0.0
