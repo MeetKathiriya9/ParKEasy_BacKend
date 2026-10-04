@@ -30,6 +30,7 @@ class ErrorCode:
 
     INTERNAL_ERROR = "INTERNAL_ERROR"
     VALIDATION_ERROR = "VALIDATION_ERROR"
+    BAD_REQUEST = "BAD_REQUEST"
     NOT_FOUND = "NOT_FOUND"
     UNAUTHORIZED = "UNAUTHORIZED"
     FORBIDDEN = "FORBIDDEN"
@@ -67,6 +68,18 @@ class AppError(Exception):
 class NotFoundError(AppError):
     status_code = status.HTTP_404_NOT_FOUND
     code = ErrorCode.NOT_FOUND
+
+
+class BadRequestError(AppError):
+    """A syntactically valid request that cannot be acted on.
+
+    Distinct from `UnauthorizedError` on purpose: an invalid password-reset
+    token means the request itself is bad, not that the caller needs to
+    authenticate.
+    """
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = ErrorCode.BAD_REQUEST
 
 
 class UnauthorizedError(AppError):

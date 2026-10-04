@@ -15,8 +15,10 @@ Two details worth calling out:
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from datetime import UTC, datetime
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pymongo import ReturnDocument
@@ -24,13 +26,19 @@ from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.errors import DuplicateKeyError
 
 from app.core.config import Settings
-from app.core.errors import ConflictError, ForbiddenError, UnauthorizedError
+from app.core.errors import (
+    BadRequestError,
+    ConflictError,
+    ForbiddenError,
+    UnauthorizedError,
+)
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import (
+    PASSWORD_RESET_TOKENS_COLLECTION,
     REVOKED_TOKENS_COLLECTION,
     USERS_COLLECTION,
 )
-from app.utils.mongo import utcnow
+from app.utils.mongo import to_object_id, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +50,8 @@ class AuthErrorCode:
     ACCOUNT_PENDING = "ACCOUNT_PENDING"
     ROLE_NOT_SELF_REGISTERABLE = "ROLE_NOT_SELF_REGISTERABLE"
     TOKEN_REVOKED = "TOKEN_REVOKED"
+    INVALID_RESET_TOKEN = "INVALID_RESET_TOKEN"
+    CURRENT_PASSWORD_INCORRECT = "CURRENT_PASSWORD_INCORRECT"
 
 
 # A syntactically valid bcrypt hash of a random value, compared against when the
@@ -96,6 +106,9 @@ async def register_user(
         "facilityIds": [],
         "createdAt": now,
         "updatedAt": now,
+        # Stamped at creation so the "token older than passwordChangedAt" check
+        # in get_current_user has a baseline from the very first login.
+        "passwordChangedAt": now,
     }
 
     try:
@@ -172,7 +185,10 @@ async def revoke_token(
         {
             "$setOnInsert": {
                 "jti": jti,
-                "userId": user_id,
+                # `RevokedTokenDocument.userId` is an ObjectId, and the JWT `sub`
+                # is that id as a string. Convert here so future joins against
+                # this collection match `users._id` directly.
+                "userId": to_object_id(user_id),
                 "exp": datetime.fromtimestamp(expires_at, tz=UTC),
                 "revokedAt": utcnow(),
                 "reason": reason,
@@ -206,3 +222,176 @@ def issue_token_for_user(
     )
     remaining = int((expires_at - utcnow()).total_seconds())
     return token, max(0, remaining)
+
+
+# --- Password reset and change (DOC section 7: "password reset"; section 21:
+# "forgot/reset password"; section 31: never store plaintext, rate-limit, log)
+
+
+def hash_reset_token(raw_token: str) -> str:
+    """Hash an emailed reset token for storage and lookup.
+
+    Only the hash is persisted, so a dump of `passwordResetTokens` cannot be
+    replayed against `/reset-password`. SHA-256 rather than bcrypt on purpose:
+    the input is 32 bytes of `secrets` output, so there is nothing to brute
+    force, and redemption has to stay a single indexed `_id` lookup.
+    """
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+async def _write_password(
+    db: AsyncDatabase,
+    *,
+    user_id: Any,
+    new_password: str,
+) -> None:
+    """Store a new password and stamp `passwordChangedAt`.
+
+    The single place that writes `passwordHash`. Keeping `passwordChangedAt` in
+    the same update is what guarantees the two can never drift: every access
+    token issued before this instant stops working immediately, which is the
+    intended effect of a password change.
+    """
+    now = utcnow()
+    await db[USERS_COLLECTION].update_one(
+        {"_id": user_id},
+        {
+            "$set": {
+                "passwordHash": hash_password(new_password),
+                "passwordChangedAt": now,
+                "updatedAt": now,
+            }
+        },
+    )
+
+
+async def create_password_reset(
+    db: AsyncDatabase,
+    *,
+    email: str,
+    settings: Settings,
+    request_ip: str | None = None,
+    user_agent: str | None = None,
+) -> tuple[Any | None, str | None]:
+    """Mint a reset token for `email` if that account exists.
+
+    Returns `(user_id, raw_token)`. Both are `None` when the address is unknown,
+    which the caller must report identically to the success case -- returning
+    anything else turns this endpoint into a user-enumeration oracle (DOC
+    section 31).
+
+    Any token already outstanding for the account is dropped first, so the
+    newest link is always the only one that works.
+    """
+    user = await db[USERS_COLLECTION].find_one({"email": email}, {"_id": 1, "status": 1})
+    if user is None:
+        return None, None
+
+    user_id = user["_id"]
+
+    # A suspended or unapproved account must not be able to use "forgot
+    # password" to mail itself a working reset link.
+    if str(user.get("status", "ACTIVE")) != "ACTIVE":
+        logger.info("Password reset requested for non-active account %s", user_id)
+        return None, None
+
+    await db[PASSWORD_RESET_TOKENS_COLLECTION].delete_many({"userId": user_id})
+
+    raw_token = secrets.token_urlsafe(settings.password_reset_token_bytes)
+    now = utcnow()
+    await db[PASSWORD_RESET_TOKENS_COLLECTION].insert_one(
+        {
+            "_id": hash_reset_token(raw_token),
+            "userId": user_id,
+            "exp": now + timedelta(seconds=settings.password_reset_expire_seconds),
+            "createdAt": now,
+            "requestIp": request_ip,
+            "userAgent": (user_agent or "")[:255] or None,
+        }
+    )
+    logger.info("Issued password reset token for user %s", user_id)
+    return user_id, raw_token
+
+
+async def consume_password_reset(
+    db: AsyncDatabase,
+    *,
+    raw_token: str,
+    new_password: str,
+) -> Any:
+    """Redeem a reset token and set a new password. Returns the user id.
+
+    `find_one_and_delete` does three jobs in one atomic operation: it looks the
+    token up by hash, refuses rows whose `exp` has passed, and removes the row
+    so the token is single-use even if two requests race. A token that was
+    never issued, already redeemed, or expired all produce the same
+    `BadRequestError`.
+    """
+    now = utcnow()
+    document = await db[PASSWORD_RESET_TOKENS_COLLECTION].find_one_and_delete(
+        {"_id": hash_reset_token(raw_token), "exp": {"$gt": now}}
+    )
+    if document is None:
+        raise BadRequestError(
+            "This password reset link is invalid or has expired. Please request a new one.",
+            code=AuthErrorCode.INVALID_RESET_TOKEN,
+        )
+
+    user_id = document["userId"]
+    await _write_password(db, user_id=user_id, new_password=new_password)
+
+    # Drop any sibling tokens so an older email in the inbox cannot be reused.
+    await db[PASSWORD_RESET_TOKENS_COLLECTION].delete_many({"userId": user_id})
+
+    logger.info("Password reset completed for user %s", user_id)
+    return user_id
+
+
+async def change_password(
+    db: AsyncDatabase,
+    *,
+    user_id: Any,
+    current_password: str,
+    new_password: str,
+) -> None:
+    """Change the password of an authenticated user.
+
+    The current password is required: an access token proves the session is
+    authenticated, not proof that whoever holds it should be able to rotate the
+    credential.
+
+    A wrong current password raises `BadRequestError` (400), deliberately *not*
+    `UnauthorizedError` (401). The token is perfectly valid - the caller simply
+    mistyped - and the client treats any 401 as "this session is dead" and drops
+    the user to the login screen. Returning 400 keeps a failed attempt from
+    looking like an expired session.
+    """
+    # `user_id` arrives as the JWT subject, which is a *string*; `users._id` is
+    # an ObjectId. Querying with the raw string matches nothing, which would
+    # look identical to a deleted account.
+    object_id = to_object_id(user_id)
+    if object_id is None:
+        raise BadRequestError(
+            "This account no longer exists",
+            code=AuthErrorCode.INVALID_CREDENTIALS,
+        )
+
+    user = await db[USERS_COLLECTION].find_one({"_id": object_id}, {"passwordHash": 1})
+    if user is None:
+        # Unreachable over HTTP: `get_current_user` already rejects a token whose
+        # account has gone. Kept so a direct service call cannot write a
+        # password onto a missing row.
+        raise BadRequestError(
+            "This account no longer exists",
+            code=AuthErrorCode.INVALID_CREDENTIALS,
+        )
+
+    if not verify_password(current_password, user.get("passwordHash", "")):
+        logger.info("Rejected password change for %s: wrong current password", user_id)
+        raise BadRequestError(
+            "Current password is incorrect",
+            code=AuthErrorCode.CURRENT_PASSWORD_INCORRECT,
+        )
+
+    await _write_password(db, user_id=object_id, new_password=new_password)
+    logger.info("Password changed for user %s", user_id)

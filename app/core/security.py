@@ -65,7 +65,15 @@ def create_access_token(
         "sub": subject,
         "role": role,
         "iss": settings.jwt_issuer,
+        # `iat` stays a whole number of seconds because that is what the JWT
+        # spec's NumericDate means to most validators.
         "iat": int(now.timestamp()),
+        # `iat_ms` is the sub-second companion, used to compare a token against
+        # `users.passwordChangedAt`. Without it a token minted in the same
+        # second as a password change is indistinguishable from one minted
+        # before it, which either locks out every new signup or leaves revoked
+        # tokens alive for a second. Ignored by anything that only reads `iat`.
+        "iat_ms": int(now.timestamp() * 1000),
         "exp": int(expires_at.timestamp()),
         "jti": uuid.uuid4().hex,
     }

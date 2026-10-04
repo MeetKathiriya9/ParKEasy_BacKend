@@ -19,6 +19,7 @@ from app.models.enums import Role, UserStatus
 
 USERS_COLLECTION = "users"
 REVOKED_TOKENS_COLLECTION = "revokedTokens"
+PASSWORD_RESET_TOKENS_COLLECTION = "passwordResetTokens"
 
 
 class UserDocument(TypedDict):
@@ -45,6 +46,16 @@ class UserDocument(TypedDict):
     updatedAt: datetime
     lastLoginAt: NotRequired[datetime]
     createdBy: NotRequired[ObjectId]
+    passwordChangedAt: NotRequired[datetime]
+    """When the password last changed.
+
+    Access tokens carry an `iat`, so `get_current_user` rejects any token issued
+    before this instant. That invalidates every outstanding session after a
+    password change without having to track individual tokens.
+
+    Absent on documents written before this field existed; `None`/missing means
+    "never changed" and must never cause a rejection.
+    """
 
 
 class RevokedTokenDocument(TypedDict):
@@ -66,6 +77,28 @@ class RevokedTokenDocument(TypedDict):
     reason: NotRequired[str]
 
 
+class PasswordResetTokenDocument(TypedDict):
+    """A row of the `passwordResetTokens` collection (DOC section 7).
+
+    `_id` is the **sha256 hash** of the emailed token, not the token itself. A
+    database leak therefore cannot be turned into password resets, because the
+    raw token only ever exists in the recipient's inbox. Hashing also makes the
+    token the natural key, so redemption is a plain `_id` lookup and needs no
+    extra index.
+
+    TTL on `exp` clears expired rows for us, so no sweeper job is needed. A row
+    is deleted outright the moment it is redeemed, which is what makes a token
+    strictly single-use: there is no window in which a spent token still exists.
+    """
+
+    _id: str
+    userId: ObjectId
+    exp: datetime
+    createdAt: datetime
+    requestIp: NotRequired[str]
+    userAgent: NotRequired[str]
+
+
 def public_user(document: dict[str, Any]) -> dict[str, Any]:
     """Project a user document down to the fields safe to send to a client.
 
@@ -84,4 +117,5 @@ def public_user(document: dict[str, Any]) -> dict[str, Any]:
         "createdAt": document.get("createdAt"),
         "updatedAt": document.get("updatedAt"),
         "lastLoginAt": document.get("lastLoginAt"),
+        "passwordChangedAt": document.get("passwordChangedAt"),
     }

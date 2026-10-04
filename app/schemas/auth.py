@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import Role, UserStatus
 from app.schemas.common import ErrorResponse
@@ -118,6 +118,7 @@ class UserResponse(BaseModel):
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
     lastLoginAt: datetime | None = None
+    passwordChangedAt: datetime | None = None
 
     model_config = {
         "json_schema_extra": {
@@ -173,11 +174,114 @@ class RegisterResponse(TokenResponse):
     message: str = "Registration successful"
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Body of `POST /api/v1/auth/forgot-password`.
+
+    The response is identical whether or not the address is registered, so this
+    schema deliberately exposes nothing beyond the address itself.
+    """
+
+    email: EmailStr
+
+    @field_validator("email")
+    @classmethod
+    def _normalise(cls, value: str) -> str:
+        return _normalise_email(value)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"email": "aarav@example.com"}
+        }
+    }
+
+
+class ForgotPasswordResponse(BaseModel):
+    """Neutral acknowledgement for `POST /auth/forgot-password`.
+
+    `devResetLink` is populated only when `ENVIRONMENT` is not `production` and
+    the console transport is in use, so the flow is testable without a mailbox.
+    It is never set in production -- that would hand the caller a reset token
+    for any address they guess.
+    """
+
+    message: str = (
+        "If an account exists for that address, a password reset link has been sent."
+    )
+    devResetLink: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    """Body of `POST /api/v1/auth/reset-password`."""
+
+    token: str = Field(min_length=16, max_length=256)
+    newPassword: Password
+
+    @field_validator("newPassword")
+    @classmethod
+    def _strength(cls, value: str) -> str:
+        return _validate_password_strength(value)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "token": "b7f1c2e4a9d84f0e8c3b5a17d6e94f20c8b1a35d7e2f904",
+                "newPassword": "newsecret456",
+            }
+        }
+    }
+
+
+class ChangePasswordRequest(BaseModel):
+    """Body of `POST /api/v1/auth/change-password`.
+
+    Requires the current password because the access token alone is not treated
+    as proof of identity for a credential change. Reusing the current password
+    is rejected: silently succeeding would leave the caller believing they had
+    rotated a compromised password when they had not.
+    """
+
+    currentPassword: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+    newPassword: Password
+
+    @field_validator("newPassword")
+    @classmethod
+    def _strength(cls, value: str) -> str:
+        return _validate_password_strength(value)
+
+    @model_validator(mode="after")
+    def _different_from_current(self) -> ChangePasswordRequest:
+        if self.currentPassword == self.newPassword:
+            raise ValueError("New password must be different from the current password")
+        return self
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "currentPassword": "oldsecret123",
+                "newPassword": "newsecret456",
+            }
+        }
+    }
+
+
+class PasswordChangedResponse(BaseModel):
+    """Acknowledgement for both `reset-password` and `change-password`."""
+
+    message: str = "Password updated. Please sign in again."
+
+
 AUTH_ERROR_RESPONSES: dict[int | str, dict[str, type]] = {
     400: {"model": ErrorResponse, "description": "Invalid credentials or validation rule"},
     401: {"model": ErrorResponse, "description": "Bad email or password"},
     403: {"model": ErrorResponse, "description": "Role may not self-register"},
     409: {"model": ErrorResponse, "description": "Email already registered"},
+    422: {"model": ErrorResponse, "description": "Request validation failed"},
+    429: {"model": ErrorResponse, "description": "Too many attempts"},
+}
+
+
+PASSWORD_RESET_ERROR_RESPONSES: dict[int | str, dict[str, type]] = {
+    400: {"model": ErrorResponse, "description": "Reset token is invalid, expired or already used"},
     422: {"model": ErrorResponse, "description": "Request validation failed"},
     429: {"model": ErrorResponse, "description": "Too many attempts"},
 }

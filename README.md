@@ -73,7 +73,7 @@ uvicorn app.main:app --port 9999 --reload
 
 ```powershell
 ruff check .                                  # lint
-python -m pytest                              # tests
+python -m pytest                              # tests (needs MongoDB)
 Invoke-RestMethod http://127.0.0.1:9999/api/v1/health
 Invoke-RestMethod http://127.0.0.1:9999/api/v1/health/db
 ```
@@ -88,7 +88,7 @@ db.parkingFacilities.getIndexes()
 
 ## Authentication
 
-Four endpoints under `/api/v1/auth`. Register and login both return a signed
+Seven endpoints under `/api/v1/auth`. Register and login both return a signed
 access token; send it as `Authorization: Bearer <token>` on protected routes.
 
 | Method | Path | Auth | Purpose |
@@ -97,6 +97,9 @@ access token; send it as `Authorization: Bearer <token>` on protected routes.
 | `POST` | `/api/v1/auth/login` | none | exchange credentials for a token |
 | `GET` | `/api/v1/auth/me` | Bearer | the current user |
 | `POST` | `/api/v1/auth/logout` | Bearer | revoke this token |
+| `POST` | `/api/v1/auth/forgot-password` | none | email a single-use reset link |
+| `POST` | `/api/v1/auth/reset-password` | none | redeem that link, set a new password |
+| `POST` | `/api/v1/auth/change-password` | Bearer | rotate your own password |
 
 ```powershell
 # Register a driver
@@ -118,7 +121,80 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/auth/logout -Method Post -Headers
 least 8 characters and contain a letter and a digit. Emails are stored
 lowercased and are unique.
 
-### How it works
+### Password reset and change
+
+```powershell
+# 1. Ask for a link. Always 202 with the same body, whether or not the
+#    address is registered.
+$req = Invoke-RestMethod http://127.0.0.1:9999/api/v1/auth/forgot-password -Method Post `
+  -ContentType 'application/json' -Body '{"email":"aarav@example.com"}'
+
+# 2. In development the link comes back in the response instead of an inbox.
+$token = ($req.devResetLink -split 'token=')[1]
+
+# 3. Redeem it.
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/auth/reset-password -Method Post `
+  -ContentType 'application/json' `
+  -Body "{`"token`":`"$token`",`"newPassword`":`"newsecret456`"}"
+
+# Or, while signed in, change your own password (needs the current one).
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/auth/change-password -Method Post `
+  -Headers $headers -ContentType 'application/json' `
+  -Body '{"currentPassword":"parkeasy123","newPassword":"newsecret456"}'
+```
+
+**How it works**
+
+- **Tokens are single-use.** A 32-byte `secrets` token is emailed as
+  `/reset-password?token=...`. Redemption is one `find_one_and_delete` on the
+  token's hash, which atomically checks it, checks `exp`, and removes it - so a
+  race between two redemptions cannot both succeed. Redeeming also deletes any
+  sibling tokens, so the newest email is always the only one that works.
+- **Only the hash is stored.** `_id` is the SHA-256 of the token, never the token
+  itself, so a dump of `passwordResetTokens` cannot be replayed. A TTL index on
+  `exp` clears links the user never clicked.
+- **A password change kills every session.** `users.passwordChangedAt` is
+  written in the same update as `passwordHash`, and `get_current_user` rejects
+  any token issued before it. That covers the session that made the change too,
+  so the client is redirected to sign in again. This is stateless - no
+  per-token tracking.
+  The comparison uses the token's `iat_ms` claim, not `iat`. JWT `iat` is a whole
+  number of seconds, and registration stamps `passwordChangedAt` immediately
+  before minting the first token, so comparing against the second-resolution
+  `iat` cannot tell "issued just before the change" from "issued just after" -
+  it signs out every new signup. Tokens without `iat_ms` (none in flight) fall
+  back to a whole-second comparison.
+- **Accounts predating `passwordChangedAt` still work.** A missing field means
+  "the password has not been changed since", not "expired"; treating it as
+  expired would lock out every pre-existing document.
+- **Requests do not reveal whether an account exists.** `forgot-password`
+  returns an identical `202` for unknown, suspended and real addresses, and the
+  email body contains no account detail. Suspended accounts get no link at all.
+- **Change-password requires the current password.** An access token proves the
+  session is authenticated, not that the holder may rotate the credential.
+  Reusing the current password is rejected so nobody believes they have rotated
+  a compromised password when they have not.
+
+> **A wrong current password is `400`, never `401`.** The token is fine; the
+> user mistyped. This is load-bearing for the client, which reads any `401` as
+> "this session is over" and drops the user to the login screen. Answering a
+> typo with `401` signs people out for mistyping a password. The client
+> additionally allowlists the four codes that really do end a session
+> (`UNAUTHORIZED`, `INVALID_TOKEN`, `TOKEN_REVOKED`, `PASSWORD_CHANGED`), so
+> `INVALID_CREDENTIALS` from a failed login never clears anything either.
+- **Delivery is pluggable** (`app/services/email.py`): `console` logs the
+  message, `smtp` sends it via `smtplib`. Delivery failure never changes the
+  response - the TTL is the real expiry guarantee.
+- **Audited** to `auditLogs` (DOC section 31): request, completion and change
+  are all recorded, including requests for unknown addresses.
+
+> **`devResetLink` is the field to watch.** It is populated only when
+> `ENVIRONMENT` is not `production` and mail was not really delivered, so the
+> flow is testable without a mailbox. If it is ever non-null in production,
+> anyone can reset any account by asking for one. `CLIENT_BASE_URL` is
+> server-side config for the same reason - never read it from a request body.
+
+### How it works (general)
 
 - **Passwords** are hashed with `bcrypt` (cost 12) via `app/core/security.py`.
   The plain password is never stored or returned. Inputs longer than bcrypt's
@@ -130,7 +206,8 @@ lowercased and are unique.
   collection, and `get_current_user` rejects it on every subsequent request.
   A TTL index on `exp` deletes each row once the token would have expired
   anyway, so no sweeper job is needed. Other sessions of the same user keep
-  working - each login gets its own `jti`.
+  working - each login gets its own `jti`. A password change is different: it
+  invalidates every session at once.
 - **Login failures are indistinguishable**: an unknown email and a wrong
   password both return the same `INVALID_CREDENTIALS` 401, and a miss still
   runs a dummy bcrypt comparison so response timing does not reveal which
@@ -147,6 +224,15 @@ lowercased and are unique.
 | `SELF_REGISTER_ROLES` | `driver,staff,operator,admin` | which roles may self-register |
 | `LOGIN_RATE_LIMIT` / `LOGIN_RATE_WINDOW_SECONDS` | `10` / `60` | per IP+email |
 | `REGISTER_RATE_LIMIT` / `REGISTER_RATE_WINDOW_SECONDS` | `5` / `3600` | per IP+email |
+| `FORGOT_PASSWORD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `5` / `3600` | per IP+email; the anti-email-bombing limit |
+| `RESET_PASSWORD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `10` / `3600` | per IP+token |
+| `CHANGE_PASSWORD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `5` / `900` | per user |
+| `PASSWORD_RESET_EXPIRES_MINUTES` | `30` | how long a link stays valid |
+| `PASSWORD_RESET_TOKEN_BYTES` | `32` | entropy of the emailed token |
+| `EMAIL_TRANSPORT` | `console` | `console` or `smtp` |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` | empty | required for `smtp`; incomplete config falls back to `console` with a warning |
+| `SMTP_USE_TLS` / `SMTP_USE_SSL` | `true` / `false` | `SSL` is for port 465 |
+| `CLIENT_BASE_URL` | `http://localhost:5173` | origin the emailed link points at; server-side config only |
 
 > **Before deploying:** set `SELF_REGISTER_ROLES=driver`. With the default,
 > anyone who can reach the API can create an `admin` account. The app logs a
@@ -156,13 +242,14 @@ lowercased and are unique.
 Rate limiting is an in-process counter (`app/core/rate_limit.py`), which is
 fine for the single Uvicorn worker used here. Move it to Redis before running
 more than one process, or the limit is per-process and trivially multiplied.
+This matters most for `forgot-password`, which is the endpoint most likely to
+be abused for email bombing.
 
 ### Not yet implemented
 
-- `POST /auth/forgot-password` and `POST /auth/reset-password` (DOC section 12).
-  Needs an email transport; there is none configured.
-- Refresh tokens and session listing.
-- Email verification.
+- Refresh tokens and session listing (DOC section 21 lists `refresh`).
+- Email verification of the registered address.
+- Password-history rules (rejecting reuse of the last N passwords).
 - Admin approval for operator onboarding. New accounts are `ACTIVE`
   immediately; flip the default in `app/services/auth.py` when that lands.
 - WebSocket `/ws` still accepts unauthenticated connections.
@@ -183,11 +270,29 @@ app/
   jobs/          background jobs: expiry, reminders, prediction refresh
   utils/         MongoDB <-> API conversion helpers
 tests/
-  conftest.py    offline app fixture + MongoDB-backed auth fixture
-  test_health.py routing, envelopes, configuration, enums
-  test_auth.py   auth/RBAC dependencies in isolation
-  test_auth_flow.py  register/login/me/logout against a real MongoDB
+  conftest.py             offline app fixture; disposable-database fixtures
+  test_health.py          routing, envelopes, configuration, enums
+  test_auth.py            auth/RBAC dependencies
+  test_password_reset.py  forgot / reset / change against a real MongoDB
 ```
+
+The auth and password-reset tests need a MongoDB on `MONGODB_URI`; they use a
+throwaway `parkeasy_test` database that is dropped on teardown, and skip the
+database-dependent cases when none is reachable. The rest of the suite runs
+fully offline.
+
+```bash
+python -m pytest                       # whole suite
+python -m pytest tests/test_password_reset.py
+python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
+```
+
+> **Coverage gap.** `tests/` used to be hidden by a bare `tests/` entry in
+> `.gitignore`, which let commit `848f63b` delete 536 lines of tests.
+> `test_password_reset.py` and the disposable-database fixtures were written to
+> replace the lost `test_auth_flow.py`, which is not recoverable from git.
+> `register` / `login` / `logout` / `me` are exercised transitively by the
+> password tests, but they have no dedicated file of their own yet.
 
 ## Conventions
 
@@ -195,12 +300,18 @@ tests/
 - **Status values** are stored in the exact DOC section 17 spelling (`AVAILABLE`, `RESERVED`, ...).
   The client's lowercase literals are mapped at the API boundary.
 - **Ids** are `ObjectId`s on the server and 24-character hex strings over the
-  wire. `app/utils/mongo.py` holds `to_object_id()` for parsing path params and
+  wire, **except** where a natural key is better: `revokedTokens._id` is the
+  token `jti` and `passwordResetTokens._id` is the SHA-256 of the reset token.
+  Both are already unique, so an `ObjectId` plus an index would buy nothing.
+  `app/utils/mongo.py` holds `to_object_id()` for parsing path params and
   `serialize()` for converting documents to JSON. Let MongoDB generate `_id` on
   insert rather than inventing one; `insert_one` populates it in place.
 - **Errors** always use one envelope: `{"error": {"code", "message", "details"}}`.
 - **Auth** is a JWT access token sent as `Authorization: Bearer <token>`, plus
   the `revokedTokens` denylist for logout. No refresh token in Phase 1.
+- **Session invalidation** has two mechanisms: `revokedTokens` for one explicit
+  sign-out, and `users.passwordChangedAt` for bulk invalidation after a password
+  change. Prefer the second for anything account-wide - it needs no per-token row.
 - **Routers** stay thin; all rules live in `app/services/`. Do not put business
   logic in route handlers (DOC section 47).
 - **No** `passlib` (incompatible with bcrypt 5.x) and **no** `motor`
@@ -215,3 +326,5 @@ tests/
 | 25 | Redis for locks and cache | MongoDB atomic operations for now | no Redis on this machine; revisit in Phase 3 |
 | 12 | four roles, role chosen at login | `role` is a field on the account; login takes email + password only | the role decides the dashboard, so it must be a server-side property rather than a picker on the login form |
 | 12 | admin approves operator onboarding | all roles self-register and start `ACTIVE` | requested for a four-role demo; governed by `SELF_REGISTER_ROLES` |
+| 24, 25 | Nodemailer or a transactional email provider | `smtplib` from the standard library, plus a `console` transport | no provider credentials exist yet; the interface is the same either way so swapping it later touches one factory function |
+| 31 | secure HTTP headers | CORS + GZip only; no `helmet` equivalent | FastAPI has no built-in security-headers middleware; add it before deploying |

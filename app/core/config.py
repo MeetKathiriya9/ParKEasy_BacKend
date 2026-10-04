@@ -52,6 +52,35 @@ class Settings(BaseSettings):
     login_rate_window_seconds: int = 60
     register_rate_limit: int = 5
     register_rate_window_seconds: int = 3600
+    forgot_password_rate_limit: int = 5
+    forgot_password_rate_window_seconds: int = 3600
+    reset_password_rate_limit: int = 10
+    reset_password_rate_window_seconds: int = 3600
+    change_password_rate_limit: int = 5
+    change_password_rate_window_seconds: int = 900
+
+    # --- Password reset ---
+    password_reset_expires_minutes: int = 30
+    password_reset_token_bytes: int = 32
+
+    # --- Email (DOC sections 24/25 name an email integration) ---
+    # The console transport logs the message instead of sending it, so the
+    # reset flow is demonstrable without an SMTP account. Switch to "smtp" once
+    # the credentials below are filled in.
+    email_transport: Literal["console", "smtp"] = "console"
+    email_from: str = "no-reply@parkeasy.local"
+    email_from_name: str = "ParkEasy"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+
+    # Origin the emailed reset link points at. Server-side configuration only:
+    # never accept this from a request body, or a caller could redirect a
+    # victim's reset token to a host they control.
+    client_base_url: str = "http://localhost:5173"
 
     # --- CORS ---
     cors_origins: Annotated[list[str], NoDecode] = Field(
@@ -101,6 +130,19 @@ class Settings(BaseSettings):
     @property
     def jwt_expire_seconds(self) -> int:
         return self.jwt_expires_minutes * 60
+
+    @property
+    def password_reset_expire_seconds(self) -> int:
+        return self.password_reset_expires_minutes * 60
+
+    @property
+    def smtp_configured(self) -> bool:
+        """True when there is enough SMTP configuration to actually send mail."""
+        return bool(self.smtp_host and self.smtp_username and self.smtp_password)
+
+    def reset_link(self, raw_token: str) -> str:
+        """Build the link the user clicks. `client_base_url` is trusted config."""
+        return f"{self.client_base_url.rstrip('/')}/reset-password?token={raw_token}"
 
     def can_self_register(self, role: Role) -> bool:
         return role in self.self_register_roles

@@ -137,6 +137,15 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
         IndexModel([("exp", ASCENDING)], expireAfterSeconds=0, name="ttl_exp"),
         IndexModel([("userId", ASCENDING)], name="userId_1"),
     ],
+    "passwordResetTokens": [
+        # Abandoned tokens are swept once they expire; redeemed ones are deleted
+        # immediately by consume_password_reset, so this TTL only ever clears
+        # links the user never clicked.
+        IndexModel([("exp", ASCENDING)], expireAfterSeconds=0, name="ttl_exp"),
+        # Supports dropping every outstanding token for a user when one is
+        # redeemed or the password changes.
+        IndexModel([("userId", ASCENDING)], name="userId_1"),
+    ],
 }
 
 
