@@ -28,6 +28,17 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
             unique=True,
             name="uniq_user_plate",
         ),
+        # DOC section 10 asks for a default vehicle, and the database - not just
+        # the service - is what guarantees a user never ends up with two. The
+        # partial filter keeps ordinary (non-default) vehicles out of the index
+        # entirely, and `isDefault` is part of the key so this does not collide
+        # with the plain `userId` index above.
+        IndexModel(
+            [("userId", ASCENDING), ("isDefault", ASCENDING)],
+            unique=True,
+            name="uniq_user_default",
+            partialFilterExpression={"isDefault": True},
+        ),
     ],
     "parkingFacilities": [
         # DOC section 19 - mandatory geospatial index

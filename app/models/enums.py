@@ -144,3 +144,31 @@ class PricingRuleType(StrEnum):
     EVENT = "event"
     OVERNIGHT = "overnight"
     DYNAMIC = "dynamic"
+
+
+# --- DOC section 18: `vehicles` key fields ---------------------------------
+
+
+class VehicleType(StrEnum):
+    """Body style. The DOC lists `type` as a key field but does not enumerate
+    values, so this set covers the categories a parking facility cares about
+    (clearance, bay size) plus an escape hatch for anything else."""
+
+    SEDAN = "sedan"
+    SUV = "suv"
+    HATCHBACK = "hatchback"
+    MOTORCYCLE = "motorcycle"
+    TRUCK = "truck"
+    VAN = "van"
+    OTHER = "other"
+
+
+class FuelType(StrEnum):
+    """Fuel/energy. The DOC lists `fuelType` as a key field without values."""
+
+    PETROL = "petrol"
+    DIESEL = "diesel"
+    ELECTRIC = "electric"
+    HYBRID = "hybrid"
+    CNG = "cng"
+    OTHER = "other"

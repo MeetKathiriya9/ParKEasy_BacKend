@@ -65,6 +65,8 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
         "vehicles",
         "User vehicles and default vehicle",
         ("GET /", "POST /", "PATCH /{id}", "DELETE /{id}", "PATCH /{id}/default"),
+        # CRUD plus the default-vehicle switch live in app/api/v1/vehicles.py.
+        implemented=True,
     ),
     RouteGroupSpec(
         "parking",

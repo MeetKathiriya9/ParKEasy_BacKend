@@ -10,7 +10,8 @@ The health probes, MongoDB connectivity, index bootstrap, error envelope, CORS
 and WebSocket channel are in place, and the full route surface is documented.
 
 **Authentication is live** for all four roles from DOC section 12 - register,
-login, current-user and logout. **Every other business endpoint still returns
+login, current-user and logout. **Profile and vehicles are live** for the
+signed-in user. **Every other business endpoint still returns
 `501 Not Implemented`** until its phase lands.
 
 | Area | State |
@@ -19,7 +20,8 @@ login, current-user and logout. **Every other business endpoint still returns
 | `auth` - register / login / me / logout | done |
 | `auth` - forgot-password / reset-password / change-password | done |
 | `users` - the signed-in user's own profile and photo | done |
-| `users` (vehicles, parking, spaces, reservations, ...) | `501` |
+| `vehicles` - list / create / edit / delete / set default | done |
+| Remaining DOC section 21 groups (parking, spaces, reservations, ...) | `501` |
 
 ## Requirements
 
@@ -270,6 +272,70 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/users/me/photo -Method Delete -He
   `PROFILE_PHOTO_REMOVED`. The log records field *names*, upload size and the
   client's declared filename - never the personal values or the image bytes.
 
+### Vehicles (DOC sections 10, 18, 21)
+
+Five endpoints under `/api/v1/vehicles` - exactly the operations DOC section 21
+assigns to the group ("CRUD vehicles, default vehicle"). Every route acts on
+the caller's **own** vehicles: `userId` comes from the token, never from the
+body or the query string.
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/vehicles` | Bearer | list the caller's vehicles, oldest first |
+| `POST` | `/api/v1/vehicles` | Bearer | register a vehicle (`201`) |
+| `PATCH` | `/api/v1/vehicles/{id}` | Bearer | edit a vehicle |
+| `DELETE` | `/api/v1/vehicles/{id}` | Bearer | remove a vehicle (`204`) |
+| `PATCH` | `/api/v1/vehicles/{id}/default` | Bearer | make it the default vehicle |
+
+```powershell
+$login = Invoke-RestMethod http://127.0.0.1:9999/api/v1/auth/login -Method Post `
+  -ContentType 'application/json' -Body '{"email":"aarav@example.com","password":"parkeasy123"}'
+$h = @{ Authorization = "Bearer $($login.accessToken)" }
+
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/vehicles -Headers $h
+
+# The first vehicle becomes the account's default automatically.
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/vehicles -Method Post -Headers $h `
+  -ContentType 'application/json' `
+  -Body '{"registrationNumber":"GJ 05 AB 1234","type":"sedan","model":"Honda Civic","fuelType":"petrol"}'
+
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/vehicles -Method Patch -Headers $h `
+  -ContentType 'application/json' -Body '{"fuelType":"electric"}'
+
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/vehicles/<id>/default -Method Patch -Headers $h
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/vehicles/<id> -Method Delete -Headers $h
+```
+
+**How it works**
+
+- **The fields are the ones DOC section 18 lists**: `registrationNumber`,
+  `type`, `model`, `fuelType` - plus `isDefault`, which sections 10 and 21 both
+  ask for. There is no `color` and no `make`; `model` is free text that carries
+  both ("Honda Civic").
+- **`isEV` is derived, never accepted.** It is `fuelType == "electric"`, so a
+  stored vehicle can never claim `fuelType: "petrol"` and `isEV: true` at the
+  same time. Sending `isEV` (or `userId`, or `isDefault` on the generic
+  `PATCH`) is a `422` rather than a silently ignored field.
+- **The registration number is normalised** to uppercase letters and digits
+  before it is stored, so `ABC-1234`, `ABC 1234` and `abc1234` are one key. A
+  repeat among the same account's vehicles is `409 REGISTRATION_DUPLICATE`; a
+  *different* account may legitimately hold the same plate.
+- **Exactly one default while any vehicle exists.** The first vehicle created
+  becomes the default, `PATCH /{id}/default` switches it (clear the old flags,
+  then set the new one), and deleting the default promotes the oldest remaining
+  vehicle. A partial unique index makes two defaults impossible at the database
+  level, and `GET` repairs a missing default, so an interrupted request can
+  never leave an account without one.
+- **Unknown ids and other users' ids are the same `404`**, with the same
+  message, so the endpoints cannot be used to probe for foreign vehicle ids
+  (DOC section 31).
+- **Audited** as `VEHICLE_CREATED`, `VEHICLE_UPDATED`, `VEHICLE_DELETED` and
+  `VEHICLE_DEFAULT_CHANGED`, recording field *names* only.
+- **Writes are rate limited** per user (`VEHICLE_WRITE_RATE_LIMIT`); `GET` is
+  not, because dashboards poll it.
+- **A ceiling** of `VEHICLE_MAX_PER_USER` vehicles per account answers
+  `409 VEHICLE_LIMIT_REACHED` instead of accepting more.
+
 ### How it works (general)
 
 - **Passwords** are hashed with `bcrypt` (cost 12) via `app/core/security.py`.
@@ -305,6 +371,8 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/users/me/photo -Method Delete -He
 | `CHANGE_PASSWORD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `5` / `900` | per user |
 | `PROFILE_UPDATE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `20` / `3600` | per user |
 | `AVATAR_UPLOAD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `10` / `3600` | per user |
+| `VEHICLE_WRITE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `60` / `3600` | per user; create / edit / delete / set-default |
+| `VEHICLE_MAX_PER_USER` | `20` | vehicles per account; the ceiling answers `409` |
 | `AVATAR_MAX_BYTES` | `2097152` | 2 MB ceiling on the uploaded file, checked before decoding |
 | `AVATAR_MAX_DIMENSION` / `AVATAR_JPEG_QUALITY` | `512` / `82` | what every upload is re-encoded to |
 | `AVATAR_DIR` | `uploads/avatars` | where stored JPEGs live; relative to `Server/`, gitignored |
@@ -332,6 +400,9 @@ be abused for email bombing.
 - Refresh tokens and session listing (DOC section 21 lists `refresh`).
 - Editing another user's profile: there is no `/users/{id}`, so an admin can
   only edit their own account. Needs an RBAC story first.
+- Reading *another* account's vehicle: `/vehicles` is scoped to the caller, so
+  an admin reviewing a booking cannot look a vehicle up by id either. Same RBAC
+  reason as `/users/{id}`.
 - Profile `preferences` and `status` (DOC section 21) - deliberately deferred.
 - Email verification of the registered address.
 - Password-history rules (rejecting reuse of the last N passwords).
@@ -360,13 +431,15 @@ tests/
   test_auth.py            auth/RBAC dependencies
   test_password_reset.py  forgot / reset / change against a real MongoDB
   test_profile.py         profile read/update, photo upload, avatar serving
+  test_vehicles.py        vehicle CRUD, default switch, index guarantees
 ```
 
-The auth, password-reset and profile tests need a MongoDB on `MONGODB_URI`;
-they use a throwaway `parkeasy_test` database that is dropped on teardown, and
-skip the database-dependent cases when none is reachable. The profile tests
-also redirect `AVATAR_DIR` into a temporary directory, so a run never writes into
-the repository's `uploads/`. The rest of the suite runs fully offline.
+The auth, password-reset, profile and vehicle tests need a MongoDB on
+`MONGODB_URI`; they use a throwaway `parkeasy_test` database that is dropped on
+teardown, and skip the database-dependent cases when none is reachable. The
+profile tests also redirect `AVATAR_DIR` into a temporary directory, so a run
+never writes into the repository's `uploads/`. The rest of the suite runs fully
+offline.
 
 ```bash
 python -m pytest                       # whole suite
@@ -407,6 +480,11 @@ python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
   logic in route handlers (DOC section 47).
 - **No** `passlib` (incompatible with bcrypt 5.x) and **no** `motor`
   (deprecated - use `pymongo.AsyncMongoClient`).
+- **Default vehicle** is a flag on the vehicle (`isDefault`), not a pointer on
+  the user, because it is read with the vehicle list on every dashboard load.
+  The "at most one per user" guarantee is a partial unique index
+  (`uniq_user_default`), not a transaction: MongoDB standalone has none, and an
+  index holds even if a route forgets to check.
 
 ## Deviations from the requirements document
 
@@ -421,3 +499,4 @@ python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
 | 31 | secure HTTP headers | CORS + GZip only; no `helmet` equivalent | FastAPI has no built-in security-headers middleware; add it before deploying |
 | 18, 21 | `users` lists `name`, `email`, `role`, `preferences`, `status` | profile is `name`, `phone`, a photo; **`email` is read-only** | a change of address has no flow in the DOC, so accepting one silently would mislead; `preferences` deferred |
 | 18 | no profile photo anywhere in the DOC | `POST/DELETE /users/me/photo`, served from `/api/v1/avatars/{name}` | requested for this build; the file is always re-encoded, so `uploads/` holds only compressed JPEGs |
+| 10, 18 | `vehicles` lists `registrationNumber, type, model, fuelType, isEV` | same fields plus `isDefault`; **`isEV` is derived from `fuelType`** rather than sent by the client | keeping both writable would let them contradict each other, and the DOC never says when a hybrid counts as an EV - one derivation rule answers it everywhere |

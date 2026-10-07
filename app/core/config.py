@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     profile_update_rate_window_seconds: int = 3600
     avatar_upload_rate_limit: int = 10
     avatar_upload_rate_window_seconds: int = 3600
+    vehicle_write_rate_limit: int = 60
+    vehicle_write_rate_window_seconds: int = 3600
+
+    # --- Vehicles (DOC sections 10/18) ---
+    # Ceiling on how many vehicles one account may register, so the group
+    # cannot be used to grow a single user's documents without bound.
+    vehicle_max_per_user: int = 20
 
     # --- Password reset ---
     password_reset_expires_minutes: int = 30
