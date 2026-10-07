@@ -53,7 +53,14 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
         # is still outstanding.
         implemented=True,
     ),
-    RouteGroupSpec("users", "Profile, preferences and account status", ("GET /me", "PATCH /me")),
+    RouteGroupSpec(
+        "users",
+        "Profile, preferences and account status",
+        ("GET /me", "PATCH /me"),
+        # Profile read/update plus avatar upload live in app/api/v1/users.py;
+        # the avatar files themselves are served by app/api/v1/avatars.py.
+        implemented=True,
+    ),
     RouteGroupSpec(
         "vehicles",
         "User vehicles and default vehicle",

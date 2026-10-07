@@ -17,8 +17,9 @@ login, current-user and logout. **Every other business endpoint still returns
 | --- | --- |
 | Health, MongoDB, indexes, CORS, errors, WebSocket | done |
 | `auth` - register / login / me / logout | done |
-| `users` profile, vehicles, parking, spaces, reservations, ... | `501` |
-| `forgot-password` / `reset-password` (DOC section 12) | not started |
+| `auth` - forgot-password / reset-password / change-password | done |
+| `users` - the signed-in user's own profile and photo | done |
+| `users` (vehicles, parking, spaces, reservations, ...) | `501` |
 
 ## Requirements
 
@@ -194,6 +195,81 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/auth/change-password -Method Post
 > anyone can reset any account by asking for one. `CLIENT_BASE_URL` is
 > server-side config for the same reason - never read it from a request body.
 
+### Profile and photo (DOC sections 18, 21)
+
+Four endpoints under `/api/v1/users` plus a public file route. Every route acts
+on the caller's **own** account; there is deliberately no `/users/{id}` yet,
+because letting an admin edit arbitrary users needs an RBAC story this phase
+does not have.
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/users/me` | Bearer | read the stored profile |
+| `PATCH` | `/api/v1/users/me` | Bearer | update `name` and `phone` |
+| `POST` | `/api/v1/users/me/photo` | Bearer | upload or replace the photo |
+| `DELETE` | `/api/v1/users/me/photo` | Bearer | remove the photo and its file |
+| `GET` | `/api/v1/avatars/{file_name}` | none | serve the stored JPEG |
+
+`GET /users/me` re-reads the document, so it reflects a change made in another
+tab immediately - unlike the cheaper `/auth/me`, which is a session restore.
+
+```powershell
+$login = Invoke-RestMethod http://127.0.0.1:9999/api/v1/auth/login -Method Post `
+  -ContentType 'application/json' -Body '{"email":"aarav@example.com","password":"parkeasy123"}'
+$h = @{ Authorization = "Bearer $($login.accessToken)" }
+
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/users/me -Headers $h
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/users/me -Method Patch -Headers $h `
+  -ContentType 'application/json' -Body '{"name":"Aarav Shah","phone":"+91 90000 00000"}'
+
+# Clear the number rather than omit it: {} would leave it untouched.
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/users/me -Method Patch -Headers $h `
+  -ContentType 'application/json' -Body '{"phone":null}'
+
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/users/me/photo -Method Post -Headers $h `
+  -Form @{ file = Get-Item .\photo.jpg }
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/users/me/photo -Method Delete -Headers $h
+```
+
+**How it works**
+
+- **`email` is not writable.** It is the login identifier and the DOC defines no
+  change-of-address flow, so sending it is a `422` (`extra="forbid"`), not a
+  silent no-op - a client bug surfaces instead of the user believing they
+  re-keyed an address they had not. `role`, `status` and `facilityIds` are
+  rejected the same way.
+- **`PATCH` distinguishes "absent" from "empty".** Omitting `phone` leaves it
+  alone; sending `null` or `""` clears it. `name` is non-nullable in the
+  database, so `name: null` and a blank name are both `422`s. Whitespace inside
+  a name collapses to single spaces, and only digits plus a leading `+` survive
+  in `phone`.
+- **Uploads are always re-encoded.** The server decodes the bytes with Pillow,
+  rejects anything that is not really a JPEG/PNG/WebP *by inspecting the decoded
+  data* (never the extension or the client's MIME type), honours EXIF
+  orientation, flattens alpha onto white, downscales to the long edge and writes
+  a progressive JPEG. `uploads/` therefore only ever contains small,
+  server-generated files - there is no path by which an untrusted file lands on
+  disk verbatim.
+- **A replace deletes the old file**; `DELETE` clears the field first and then
+  unlinks, because a stale file costs a few kilobytes while a `photoUrl` with no
+  file behind it costs a broken image in the UI.
+- **Errors carry a reason.** Photo failures are `400`s whose
+  `error.details.reason` is one of `PHOTO_EMPTY`, `PHOTO_TOO_LARGE`,
+  `PHOTO_UNREADABLE`, `PHOTO_FORMAT_UNSUPPORTED`, `PHOTO_TOO_MANY_PIXELS`, so
+  the client can branch without parsing prose.
+- **The avatar route is deliberately public.** An `<img src>` cannot attach an
+  `Authorization` header, so a token-protected image URL would simply not render.
+  The filename is the capability: 16 random bytes minted server-side, matched
+  against an exact pattern *before* touching the filesystem, which is what keeps
+  `../` unreachable rather than merely unlikely.
+- **The body has a hard ceiling.** `MAX_REQUEST_BODY_BYTES` (4 MB) is refused
+  before routing with a `413 REQUEST_TOO_LARGE`. It sits above `AVATAR_MAX_BYTES`
+  (2 MB) on purpose, so an oversized photo gets the specific `400` and only a
+  grossly oversized body gets the generic one.
+- **Audited** as `PROFILE_UPDATED`, `PROFILE_PHOTO_CHANGED` and
+  `PROFILE_PHOTO_REMOVED`. The log records field *names*, upload size and the
+  client's declared filename - never the personal values or the image bytes.
+
 ### How it works (general)
 
 - **Passwords** are hashed with `bcrypt` (cost 12) via `app/core/security.py`.
@@ -227,6 +303,12 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/auth/change-password -Method Post
 | `FORGOT_PASSWORD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `5` / `3600` | per IP+email; the anti-email-bombing limit |
 | `RESET_PASSWORD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `10` / `3600` | per IP+token |
 | `CHANGE_PASSWORD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `5` / `900` | per user |
+| `PROFILE_UPDATE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `20` / `3600` | per user |
+| `AVATAR_UPLOAD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `10` / `3600` | per user |
+| `AVATAR_MAX_BYTES` | `2097152` | 2 MB ceiling on the uploaded file, checked before decoding |
+| `AVATAR_MAX_DIMENSION` / `AVATAR_JPEG_QUALITY` | `512` / `82` | what every upload is re-encoded to |
+| `AVATAR_DIR` | `uploads/avatars` | where stored JPEGs live; relative to `Server/`, gitignored |
+| `MAX_REQUEST_BODY_BYTES` | `4194304` | global body ceiling, answered with `413` |
 | `PASSWORD_RESET_EXPIRES_MINUTES` | `30` | how long a link stays valid |
 | `PASSWORD_RESET_TOKEN_BYTES` | `32` | entropy of the emailed token |
 | `EMAIL_TRANSPORT` | `console` | `console` or `smtp` |
@@ -248,6 +330,9 @@ be abused for email bombing.
 ### Not yet implemented
 
 - Refresh tokens and session listing (DOC section 21 lists `refresh`).
+- Editing another user's profile: there is no `/users/{id}`, so an admin can
+  only edit their own account. Needs an RBAC story first.
+- Profile `preferences` and `status` (DOC section 21) - deliberately deferred.
 - Email verification of the registered address.
 - Password-history rules (rejecting reuse of the last N passwords).
 - Admin approval for operator onboarding. New accounts are `ACTIVE`
@@ -260,11 +345,11 @@ be abused for email bombing.
 app/
   main.py        application factory, lifespan, CORS, WebSocket channel
   core/          config (pydantic-settings), security (PyJWT + bcrypt), errors,
-                 logging, rate limiting
+                 logging, rate limiting, request body ceiling
   db/            PyMongo AsyncMongoClient lifecycle, index definitions
   api/           dependencies (auth, RBAC, facility scope) and v1 routers
   models/        domain enums (DOC section 17), user document shape
-  schemas/       shared envelopes plus the auth request/response models
+  schemas/       shared envelopes plus the auth and profile request models
   services/      business logic - one module per domain (DOC section 24)
   sockets/       WebSocket connection manager + DOC section 26 event names
   jobs/          background jobs: expiry, reminders, prediction refresh
@@ -274,12 +359,14 @@ tests/
   test_health.py          routing, envelopes, configuration, enums
   test_auth.py            auth/RBAC dependencies
   test_password_reset.py  forgot / reset / change against a real MongoDB
+  test_profile.py         profile read/update, photo upload, avatar serving
 ```
 
-The auth and password-reset tests need a MongoDB on `MONGODB_URI`; they use a
-throwaway `parkeasy_test` database that is dropped on teardown, and skip the
-database-dependent cases when none is reachable. The rest of the suite runs
-fully offline.
+The auth, password-reset and profile tests need a MongoDB on `MONGODB_URI`;
+they use a throwaway `parkeasy_test` database that is dropped on teardown, and
+skip the database-dependent cases when none is reachable. The profile tests
+also redirect `AVATAR_DIR` into a temporary directory, so a run never writes into
+the repository's `uploads/`. The rest of the suite runs fully offline.
 
 ```bash
 python -m pytest                       # whole suite
@@ -307,6 +394,10 @@ python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
   `serialize()` for converting documents to JSON. Let MongoDB generate `_id` on
   insert rather than inventing one; `insert_one` populates it in place.
 - **Errors** always use one envelope: `{"error": {"code", "message", "details"}}`.
+- **Photos** live on disk under `AVATAR_DIR`, never in MongoDB: a document dump
+  should not carry binary blobs, and `FileResponse` streams them better. The URL
+  is `/api/v1/avatars/<generated name>`, public because an `<img src>` cannot
+  authenticate, and re-created on every upload so it is safe to cache forever.
 - **Auth** is a JWT access token sent as `Authorization: Bearer <token>`, plus
   the `revokedTokens` denylist for logout. No refresh token in Phase 1.
 - **Session invalidation** has two mechanisms: `revokedTokens` for one explicit
@@ -328,3 +419,5 @@ python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
 | 12 | admin approves operator onboarding | all roles self-register and start `ACTIVE` | requested for a four-role demo; governed by `SELF_REGISTER_ROLES` |
 | 24, 25 | Nodemailer or a transactional email provider | `smtplib` from the standard library, plus a `console` transport | no provider credentials exist yet; the interface is the same either way so swapping it later touches one factory function |
 | 31 | secure HTTP headers | CORS + GZip only; no `helmet` equivalent | FastAPI has no built-in security-headers middleware; add it before deploying |
+| 18, 21 | `users` lists `name`, `email`, `role`, `preferences`, `status` | profile is `name`, `phone`, a photo; **`email` is read-only** | a change of address has no flow in the DOC, so accepting one silently would mislead; `preferences` deferred |
+| 18 | no profile photo anywhere in the DOC | `POST/DELETE /users/me/photo`, served from `/api/v1/avatars/{name}` | requested for this build; the file is always re-encoded, so `uploads/` holds only compressed JPEGs |

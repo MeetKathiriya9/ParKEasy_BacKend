@@ -112,6 +112,7 @@ class UserResponse(BaseModel):
     phone: str | None = None
     role: Role
     status: UserStatus
+    photoUrl: str | None = None
     facilityIds: list[str] = Field(default_factory=list)
     # Typed as datetime so OpenAPI documents the format; Pydantic serialises
     # UTC values with a trailing "Z", which is what the client expects.

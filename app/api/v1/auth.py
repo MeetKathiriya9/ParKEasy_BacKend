@@ -20,9 +20,10 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from pymongo.asynchronous.database import AsyncDatabase
 
 from app.api.deps import CurrentUserDep
+from app.api.throttle import client_ip, throttle
 from app.core.config import Settings, get_settings
-from app.core.errors import AppError, ErrorCode, UnauthorizedError
-from app.core.rate_limit import RateLimit, rate_limiter
+from app.core.errors import UnauthorizedError
+from app.core.rate_limit import RateLimit
 from app.core.security import decode_access_token
 from app.db.client import get_database
 from app.models.enums import Role
@@ -63,37 +64,6 @@ AUTHENTICATED_ERRORS: dict[int | str, dict[str, type]] = {
 }
 
 
-def _client_ip(request: Request) -> str:
-    """Best-effort client address used as a rate-limit key.
-
-    `X-Forwarded-For` is only trusted because the API is expected to sit behind
-    a reverse proxy in deployment. Exposed directly, that header is
-    client-controlled and a determined attacker can forge it -- see README.md.
-    """
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
-def _throttle(request: Request, *, bucket: str, identity: str, rule: RateLimit) -> None:
-    """Raise `429` when this caller has exceeded `rule`.
-
-    Keyed on IP *and* identity so one attacker cannot lock out an entire office
-    NAT, and a single account cannot be brute-forced from many addresses.
-    """
-    key = f"{bucket}:{_client_ip(request)}:{identity.lower()}"
-    allowed, _remaining, retry_after = rate_limiter.check(key, rule)
-    if not allowed:
-        logger.warning("Rate limit hit on '%s' for %s", bucket, identity)
-        raise AppError(
-            "Too many attempts. Please try again later.",
-            code=ErrorCode.RATE_LIMITED,
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            details={"retry_after_seconds": retry_after},
-        )
-
-
 def _to_user_response(document: dict) -> UserResponse:
     return UserResponse.model_validate(public_user(document))
 
@@ -117,7 +87,7 @@ async def register(
     db: Annotated[AsyncDatabase, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> RegisterResponse:
-    _throttle(
+    throttle(
         request,
         bucket="register",
         identity=payload.email,
@@ -162,7 +132,7 @@ async def login(
     db: Annotated[AsyncDatabase, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> TokenResponse:
-    _throttle(
+    throttle(
         request,
         bucket="login",
         identity=payload.email,
@@ -192,15 +162,20 @@ async def login(
     responses=AUTHENTICATED_ERRORS,
 )
 async def read_current_user(user: CurrentUserDep) -> UserResponse:
-    """Return the principal decoded from the Bearer token.
+    """Return the principal for the presented Bearer token.
 
-    Built from the token claims rather than a fresh database read, so it is
-    cheap; the trade-off is that a role change lands on the next login.
+    Identity fields come from the user document that `get_current_user` already
+    reads to check `passwordChangedAt`, so the photo and phone survive a page
+    refresh without an extra query. Authorization fields (`role`, `status`,
+    `facilityIds`) are still taken from the token, so a change to those lands on
+    the next login.
     """
     return UserResponse(
         id=user.id,
         name=user.name or user.email or user.id,
         email=user.email or "",
+        phone=user.phone,
+        photoUrl=user.photo_url,
         role=user.role,
         status=user.status,
         facilityIds=sorted(user.facility_ids),
@@ -268,7 +243,7 @@ async def forgot_password(
     db: Annotated[AsyncDatabase, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ForgotPasswordResponse:
-    _throttle(
+    throttle(
         request,
         bucket="forgot-password",
         identity=payload.email,
@@ -282,7 +257,7 @@ async def forgot_password(
         db,
         email=payload.email,
         settings=settings,
-        request_ip=_client_ip(request),
+        request_ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -295,7 +270,7 @@ async def forgot_password(
             action="PASSWORD_RESET_REQUESTED",
             entity="user",
             outcome="UNKNOWN_ACCOUNT",
-            ip=_client_ip(request),
+            ip=client_ip(request),
             metadata={"email": payload.email},
         )
         return ForgotPasswordResponse()
@@ -320,7 +295,7 @@ async def forgot_password(
         action="PASSWORD_RESET_REQUESTED",
         entity="user",
         actor_id=user_id,
-        ip=_client_ip(request),
+        ip=client_ip(request),
         metadata={"email": payload.email, "delivered": delivered},
     )
     logger.info("Password reset email queued for %s (delivered=%s)", payload.email, delivered)
@@ -350,7 +325,7 @@ async def reset_password(
     db: Annotated[AsyncDatabase, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> PasswordChangedResponse:
-    _throttle(
+    throttle(
         request,
         # Keyed on the token rather than an email: this endpoint has no account
         # context, and the token is the only thing worth limiting per-caller.
@@ -373,7 +348,7 @@ async def reset_password(
         action="PASSWORD_RESET_COMPLETED",
         entity="user",
         actor_id=user_id,
-        ip=_client_ip(request),
+        ip=client_ip(request),
     )
     logger.info("Password reset completed for %s", user_id)
 
@@ -403,7 +378,7 @@ async def change_password_route(
     db: Annotated[AsyncDatabase, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> PasswordChangedResponse:
-    _throttle(
+    throttle(
         request,
         bucket="change-password",
         identity=user.id,
@@ -425,7 +400,7 @@ async def change_password_route(
         action="PASSWORD_CHANGED",
         entity="user",
         actor_id=user.id,
-        ip=_client_ip(request),
+        ip=client_ip(request),
     )
     logger.info("Password changed for %s", user.id)
 

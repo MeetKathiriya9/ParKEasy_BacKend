@@ -46,6 +46,14 @@ class UserDocument(TypedDict):
     updatedAt: datetime
     lastLoginAt: NotRequired[datetime]
     createdBy: NotRequired[ObjectId]
+    photoUrl: NotRequired[str | None]
+    """URL of the compressed avatar JPEG, `/api/v1/avatars/<file>`.
+
+    Absent (or `None`) means the client should fall back to initials. The file
+    itself lives under `settings.avatar_path` and is always re-encoded on
+    upload, so this value only ever points at a server-generated name.
+    """
+
     passwordChangedAt: NotRequired[datetime]
     """When the password last changed.
 
@@ -113,6 +121,7 @@ def public_user(document: dict[str, Any]) -> dict[str, Any]:
         "phone": document.get("phone"),
         "role": document.get("role"),
         "status": document.get("status"),
+        "photoUrl": document.get("photoUrl"),
         "facilityIds": list(document.get("facilityIds") or []),
         "createdAt": document.get("createdAt"),
         "updatedAt": document.get("updatedAt"),

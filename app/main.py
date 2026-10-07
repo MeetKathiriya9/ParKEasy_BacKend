@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from app.api.v1.router import api_router
+from app.core.body_limit import RequestBodyLimitMiddleware
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
@@ -79,6 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("Starting %s v%s (%s)", settings.app_name, settings.version, settings.environment)
     _warn_on_permissive_registration(settings)
+    _ensure_upload_directories(settings)
     try:
         app.state.db = await connect_to_mongo(settings)
         await ensure_indexes(app.state.db)
@@ -92,6 +94,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await close_mongo_connection()
         logger.info("Shutdown complete")
+
+
+def _ensure_upload_directories(settings: Settings) -> None:
+    """Create the avatar upload directory so the first upload cannot fail.
+
+    A failure here is logged rather than raised: the API should still boot and
+    serve everything else, and `profile.save_photo` creates the directory again
+    on demand.
+    """
+    try:
+        settings.avatar_path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.exception("Could not create avatar directory at %s", settings.avatar_path)
 
 
 def _warn_on_permissive_registration(settings: Settings) -> None:
@@ -129,6 +144,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Health probes must answer even if the database is down.
     app.state.db = None
 
+    # Added first so it sits *inside* CORS and GZip: the 413 it returns still
+    # picks up CORS headers, and an oversized body is refused before either
+    # other middleware has done any work.
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_bytes=settings.max_request_body_bytes,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

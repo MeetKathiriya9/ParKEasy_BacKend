@@ -7,6 +7,7 @@ All settings are declared once here so that nothing else in the codebase reads
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
@@ -58,10 +59,23 @@ class Settings(BaseSettings):
     reset_password_rate_window_seconds: int = 3600
     change_password_rate_limit: int = 5
     change_password_rate_window_seconds: int = 900
+    profile_update_rate_limit: int = 20
+    profile_update_rate_window_seconds: int = 3600
+    avatar_upload_rate_limit: int = 10
+    avatar_upload_rate_window_seconds: int = 3600
 
     # --- Password reset ---
     password_reset_expires_minutes: int = 30
     password_reset_token_bytes: int = 32
+
+    # --- Profile photo ---
+    # Uploads are always re-encoded server-side, so `uploads/` only ever holds
+    # compressed JPEGs regardless of what the client sent.
+    avatar_max_bytes: int = 2 * 1024 * 1024
+    avatar_max_pixels: int = 25_000_000
+    avatar_max_dimension: int = 512
+    avatar_jpeg_quality: int = 82
+    avatar_dir: str = "uploads/avatars"
 
     # --- Email (DOC sections 24/25 name an email integration) ---
     # The console transport logs the message instead of sending it, so the
@@ -91,6 +105,11 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 9999
     reload: bool = True
+
+    # Global request body ceiling, enforced before routing. Comfortably above
+    # `avatar_max_bytes` so an oversized photo gets the route's specific
+    # message, while a genuinely abusive body is refused outright.
+    max_request_body_bytes: int = 4 * 1024 * 1024
 
     # --- Logging ---
     log_level: str = "INFO"
@@ -139,6 +158,14 @@ class Settings(BaseSettings):
     def smtp_configured(self) -> bool:
         """True when there is enough SMTP configuration to actually send mail."""
         return bool(self.smtp_host and self.smtp_username and self.smtp_password)
+
+    @property
+    def avatar_path(self) -> Path:
+        """Absolute directory avatar JPEGs are written to."""
+        path = Path(self.avatar_dir)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[2] / path
+        return path
 
     def reset_link(self, raw_token: str) -> str:
         """Build the link the user clicks. `client_base_url` is trusted config."""

@@ -43,12 +43,21 @@ def _as_utc(value: Any) -> datetime | None:
 
 @dataclass(slots=True)
 class CurrentUser:
-    """The authenticated principal, decoded from the JWT."""
+    """The authenticated principal.
+
+    Identity fields (`name`, `email`, `phone`, `photo_url`) come from the user
+    document read during authentication, so a profile edit is reflected on the
+    next request without a re-login. Authorization fields (`role`, `status`,
+    `facility_ids`) still come from the token, which is the documented
+    trade-off: those change on the next login rather than mid-session.
+    """
 
     id: str
     role: Role
     email: str | None = None
     name: str | None = None
+    phone: str | None = None
+    photo_url: str | None = None
     status: UserStatus = UserStatus.ACTIVE
     facility_ids: frozenset[str] = frozenset()
 
@@ -111,7 +120,10 @@ async def get_current_user(
 
     revoked, account = await asyncio.gather(
         _is_revoked(),
-        db[USERS_COLLECTION].find_one({"_id": to_object_id(subject)}, {"passwordChangedAt": 1}),
+        db[USERS_COLLECTION].find_one(
+            {"_id": to_object_id(subject)},
+            {"passwordChangedAt": 1, "name": 1, "email": 1, "phone": 1, "photoUrl": 1},
+        ),
     )
 
     if revoked:
@@ -160,8 +172,12 @@ async def get_current_user(
     return CurrentUser(
         id=subject,
         role=role,
-        email=payload.get("email"),
-        name=payload.get("name"),
+        # Prefer the stored document so a profile edit shows up immediately;
+        # fall back to the claim for a legacy row that predates a field.
+        email=account.get("email") or payload.get("email"),
+        name=account.get("name") or payload.get("name"),
+        phone=account.get("phone"),
+        photo_url=account.get("photoUrl"),
         status=status,
         facility_ids=frozenset(facility_ids),
     )

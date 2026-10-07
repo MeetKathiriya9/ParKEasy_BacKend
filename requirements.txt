@@ -22,6 +22,9 @@ pydantic==2.13.5
 pydantic-settings==2.15.0
 email-validator==2.3.0
 
+# --- Images (profile photo re-encoding) ---
+Pillow==12.3.0
+
 # --- Auth ---
 PyJWT==2.15.0
 bcrypt==5.0.0
