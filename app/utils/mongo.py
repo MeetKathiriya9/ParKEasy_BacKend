@@ -38,6 +38,18 @@ def to_object_id(value: str | ObjectId) -> ObjectId | None:
         return None
 
 
+def as_utc(value: datetime | None) -> datetime | None:
+    """Label a stored timestamp as UTC.
+
+    PyMongo hands back naive datetimes by default, and a naive value serialises
+    without an offset (`2026-10-07T17:03:30.379`) while an aware one uses `Z`.
+    Normalising here keeps `createdAt` identical whichever endpoint returned it.
+    """
+    if value is None or isinstance(value, str):
+        return value  # type: ignore[return-value]
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def serialize(document: Any) -> Any:
     """Recursively make a Mongo document JSON-safe.
 

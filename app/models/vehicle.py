@@ -17,12 +17,13 @@ unique index on `(userId, registrationNumber)` compares like with like and
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, TypedDict
 
 from bson import ObjectId
 
 from app.models.enums import FuelType, VehicleType
+from app.utils.mongo import as_utc
 
 VEHICLES_COLLECTION = "vehicles"
 
@@ -84,18 +85,6 @@ class VehicleDocument(TypedDict):
     updatedAt: datetime
 
 
-def _as_utc(value: datetime | None) -> datetime | None:
-    """Label a stored timestamp as UTC.
-
-    PyMongo hands back naive datetimes by default, and a naive value serialises
-    without an offset (`2026-10-07T17:03:30.379`) while an aware one uses `Z`.
-    Normalising here keeps `createdAt` identical whichever endpoint returned it.
-    """
-    if value is None or isinstance(value, str):
-        return value  # type: ignore[return-value]
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
 def public_vehicle(document: dict[str, Any]) -> dict[str, Any]:
     """Project a vehicle document down to the fields safe to send to a client.
 
@@ -111,7 +100,7 @@ def public_vehicle(document: dict[str, Any]) -> dict[str, Any]:
         "fuelType": document.get("fuelType"),
         "isEV": document.get("isEV"),
         "isDefault": bool(document.get("isDefault", False)),
-        "createdAt": _as_utc(document.get("createdAt")),
+        "createdAt": as_utc(document.get("createdAt")),
     }
 
 

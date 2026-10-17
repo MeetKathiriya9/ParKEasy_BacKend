@@ -6,7 +6,7 @@ probes, authentication, and the remaining DOC section 21 stubs.
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, avatars, health, users, vehicles
+from app.api.v1 import auth, avatars, facilities, health, users, vehicles
 from app.api.v1.stubs import build_stub_routers
 
 api_router = APIRouter()
@@ -16,6 +16,7 @@ api_router.include_router(health.router)
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(vehicles.router)
+api_router.include_router(facilities.router)
 # Avatar files are served from their own prefix so the URL is short and stable.
 api_router.include_router(avatars.router)
 

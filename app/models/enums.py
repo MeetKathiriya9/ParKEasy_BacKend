@@ -49,6 +49,26 @@ class SpaceType(StrEnum):
     ACCESSIBLE = "accessible"
 
 
+class Amenity(StrEnum):
+    """Facility amenities (DOC section 18 lists the field, not the vocabulary).
+
+    Lowercase like the other client-facing literals (`VehicleType`,
+    `SpaceType`). Three of these double as the boolean flags the driver UI
+    shows: `ev_charging` -> `hasEV`, `covered` -> `hasCovered`, `accessible` ->
+    `hasAccessible`, derived at the API boundary so they cannot disagree with
+    the amenity list itself.
+    """
+
+    EV_CHARGING = "ev_charging"
+    COVERED = "covered"
+    SECURITY = "security"
+    CAMERAS = "cameras"
+    RESTROOMS = "restrooms"
+    ACCESSIBLE = "accessible"
+    VALET = "valet"
+    ELEVATOR = "elevator"
+
+
 class ReservationStatus(StrEnum):
     PENDING = "PENDING"
     CONFIRMED = "CONFIRMED"

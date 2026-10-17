@@ -209,7 +209,7 @@ def require_facility_scope(facility_id_param: str = "facility_id") -> Any:
 
     Resolves the target facility id from a path parameter, and additionally
     refuses to let a user act on a facility they do not own by reading the
-    `ownerId` of the target document.
+    `operatorId` of the target document.
     """
 
     async def _dependency(
@@ -226,11 +226,16 @@ def require_facility_scope(facility_id_param: str = "facility_id") -> Any:
 
         # Operator: verify ownership rather than trusting the request alone.
         if user.role is Role.OPERATOR:
-            facility = await db["parkingFacilities"].find_one(
-                {"_id": facility_id}, {"ownerId": 1}
-            )
-            owner_id = (facility or {}).get("ownerId")
-            if owner_id is None or str(owner_id) == user.id:
+            object_id = to_object_id(facility_id)
+            facility = None
+            if object_id is not None:
+                facility = await db["parkingFacilities"].find_one(
+                    {"_id": object_id}, {"operatorId": 1}
+                )
+            # A facility that does not exist is a 403 here, not a 404: this
+            # dependency answers on every scoped route and must not leak
+            # which ids are real.
+            if facility is not None and str(facility.get("operatorId")) == user.id:
                 return user
 
         raise ForbiddenError("You do not have access to this facility")

@@ -69,6 +69,14 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
         implemented=True,
     ),
     RouteGroupSpec(
+        "facilities",
+        "Parking facility management (operator/admin CRUD)",
+        ("GET /", "POST /", "GET /{id}", "PATCH /{id}", "DELETE /{id}", "PATCH /{id}/status"),
+        # CRUD plus the status transition live in app/api/v1/facilities.py;
+        # driver-facing discovery is the separate `parking` group.
+        implemented=True,
+    ),
+    RouteGroupSpec(
         "parking",
         "Parking discovery: nearby search, details, filters",
         ("GET /nearby", "GET /search", "GET /{id}", "GET /{id}/availability"),

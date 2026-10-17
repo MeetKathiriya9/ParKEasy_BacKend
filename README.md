@@ -10,8 +10,8 @@ The health probes, MongoDB connectivity, index bootstrap, error envelope, CORS
 and WebSocket channel are in place, and the full route surface is documented.
 
 **Authentication is live** for all four roles from DOC section 12 - register,
-login, current-user and logout. **Profile and vehicles are live** for the
-signed-in user. **Every other business endpoint still returns
+login, current-user and logout. **Profile, vehicles and facility management are
+live** for the signed-in user. **Every other business endpoint still returns
 `501 Not Implemented`** until its phase lands.
 
 | Area | State |
@@ -21,6 +21,7 @@ signed-in user. **Every other business endpoint still returns
 | `auth` - forgot-password / reset-password / change-password | done |
 | `users` - the signed-in user's own profile and photo | done |
 | `vehicles` - list / create / edit / delete / set default | done |
+| `facilities` - operator/admin CRUD plus the status transition | done |
 | Remaining DOC section 21 groups (parking, spaces, reservations, ...) | `501` |
 
 ## Requirements
@@ -336,6 +337,83 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/vehicles/<id> -Method Delete -Hea
 - **A ceiling** of `VEHICLE_MAX_PER_USER` vehicles per account answers
   `409 VEHICLE_LIMIT_REACHED` instead of accepting more.
 
+### Facilities (DOC sections 7, 11, 18, 21)
+
+Six endpoints under `/api/v1/facilities` - the operator/admin side of DOC
+section 7 ("create and manage parking facilities") and the close/reopen
+workflow of section 11.169. Driver-facing discovery (nearby search,
+availability) is the separate `parking` group and is still `501`.
+
+| Method | Path | Roles | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/facilities` | operator, admin, staff | list what the caller may see |
+| `POST` | `/api/v1/facilities` | operator, admin | create a facility (`201`) |
+| `GET` | `/api/v1/facilities/{id}` | operator, admin, staff | read one |
+| `PATCH` | `/api/v1/facilities/{id}` | operator, admin | edit one |
+| `DELETE` | `/api/v1/facilities/{id}` | operator, admin | remove one (`204`) |
+| `PATCH` | `/api/v1/facilities/{id}/status` | operator, admin | close / reopen / maintain |
+
+```powershell
+$h = @{ Authorization = "Bearer $token" }
+
+# Operator: facilities you own. Admin: every facility. Staff: your assignments.
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities -Headers $h
+
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities -Method Post -Headers $h `
+  -ContentType 'application/json' `
+  -Body '{"name":"CHARUSAT Central Lot","address":"CHARUSAT Campus, Changa","lat":22.9922,"lng":72.6667,"capacity":120,"amenities":["ev_charging","covered"]}'
+
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities/<id> -Method Patch -Headers $h `
+  -ContentType 'application/json' -Body '{"capacity":150}'
+
+# DOC section 11.169: status is a first-class transition, not a PATCH field.
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities/<id>/status -Method Patch -Headers $h `
+  -ContentType 'application/json' -Body '{"status":"TEMPORARILY_CLOSED","reason":"Resurfacing"}'
+
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities/<id> -Method Delete -Headers $h
+```
+
+**How it works**
+
+- **Scope is role-aware.** An operator manages only the facilities whose
+  `operatorId` is their own id - one account may hold many (DOC section 8
+  multi-facility operator). An admin manages everything and may create a
+  facility on another operator's behalf by sending `operatorId`; that field is
+  never transferable afterwards. Staff may *read* the facilities their token
+  assigns them and never write. Drivers are refused with `403` - their window
+  onto facilities is `/parking`.
+- **A foreign or malformed id is the same `404`**, same message, so the
+  endpoints cannot probe for real ids (DOC section 31).
+- **`status` is not a PATCH field.** Sending it answers a `422` naming
+  `PATCH /facilities/{id}/status`; transitions among `ACTIVE`, `INACTIVE`,
+  `TEMPORARILY_CLOSED` and `MAINTENANCE` (DOC section 17) are all allowed, and
+  setting the status a facility already holds is a no-op that writes no audit
+  row. The reason travels with the audit row; driver notifications arrive with
+  the notifications group.
+- **`operatorId` never changes.** Ownership is the token, not the body. The
+  response also carries `operatorName`, the owning account's display name,
+  resolved from the `users` collection in one batched query so the admin
+  listing can show who runs each facility without a second request.
+- **`lat`/`lng` are the client-facing form of a GeoJSON Point.** They are stored
+  as `location` in `[lng, lat]` order behind a `2dsphere` index (DOC section
+  19), and unwrapped on the way out. The response also derives `hasEV`,
+  `hasCovered` and `hasAccessible` from `amenities`, and `isOpenNow` from
+  `open24h` + the `HH:MM` UTC hours - never stored, so they cannot disagree
+  with the document.
+- **Hours are validated against the merged result.** A `PATCH` that flips
+  `open24h` to `false` without supplying a coherent opening/closing pair is a
+  `422`, because the stored document cannot carry the new state.
+- **Delete is refused with `409 FACILITY_IN_USE`** while any reservation or
+  parking session still points at the facility - retiring a busy garage is a
+  status change, not a delete.
+- **Audited** as `FACILITY_CREATED`, `FACILITY_UPDATED`, `FACILITY_DELETED`
+  and `FACILITY_STATUS_CHANGED` (`{from, to, reason}`), recording field *names*
+  only.
+- **Writes are rate limited** per operator (`FACILITY_WRITE_RATE_LIMIT`); `GET`
+  is not, because dashboards poll it.
+- **A ceiling** of `FACILITY_MAX_PER_OPERATOR` facilities per operator answers
+  `409 FACILITY_LIMIT_REACHED` instead of accepting more.
+
 ### How it works (general)
 
 - **Passwords** are hashed with `bcrypt` (cost 12) via `app/core/security.py`.
@@ -373,6 +451,8 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/vehicles/<id> -Method Delete -Hea
 | `AVATAR_UPLOAD_RATE_LIMIT` / `..._WINDOW_SECONDS` | `10` / `3600` | per user |
 | `VEHICLE_WRITE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `60` / `3600` | per user; create / edit / delete / set-default |
 | `VEHICLE_MAX_PER_USER` | `20` | vehicles per account; the ceiling answers `409` |
+| `FACILITY_WRITE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `60` / `3600` | per operator; create / edit / delete / status |
+| `FACILITY_MAX_PER_OPERATOR` | `50` | facilities per operator; the ceiling answers `409` |
 | `AVATAR_MAX_BYTES` | `2097152` | 2 MB ceiling on the uploaded file, checked before decoding |
 | `AVATAR_MAX_DIMENSION` / `AVATAR_JPEG_QUALITY` | `512` / `82` | what every upload is re-encoded to |
 | `AVATAR_DIR` | `uploads/avatars` | where stored JPEGs live; relative to `Server/`, gitignored |
@@ -432,9 +512,10 @@ tests/
   test_password_reset.py  forgot / reset / change against a real MongoDB
   test_profile.py         profile read/update, photo upload, avatar serving
   test_vehicles.py        vehicle CRUD, default switch, index guarantees
+  test_facilities.py      facility CRUD, status transitions, scope matrix
 ```
 
-The auth, password-reset, profile and vehicle tests need a MongoDB on
+The auth, password-reset, profile, vehicle and facility tests need a MongoDB on
 `MONGODB_URI`; they use a throwaway `parkeasy_test` database that is dropped on
 teardown, and skip the database-dependent cases when none is reachable. The
 profile tests also redirect `AVATAR_DIR` into a temporary directory, so a run
@@ -500,3 +581,6 @@ python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
 | 18, 21 | `users` lists `name`, `email`, `role`, `preferences`, `status` | profile is `name`, `phone`, a photo; **`email` is read-only** | a change of address has no flow in the DOC, so accepting one silently would mislead; `preferences` deferred |
 | 18 | no profile photo anywhere in the DOC | `POST/DELETE /users/me/photo`, served from `/api/v1/avatars/{name}` | requested for this build; the file is always re-encoded, so `uploads/` holds only compressed JPEGs |
 | 10, 18 | `vehicles` lists `registrationNumber, type, model, fuelType, isEV` | same fields plus `isDefault`; **`isEV` is derived from `fuelType`** rather than sent by the client | keeping both writable would let them contradict each other, and the DOC never says when a hybrid counts as an EV - one derivation rule answers it everywhere |
+| 21 | no CRUD row for facilities (only `/api/parking` for discovery) | new `/api/v1/facilities` group for the management side | DOC section 7 asks operators to "create and manage parking facilities" and section 11.169 to close/reopen them, so the operations have to live somewhere; discovery stays in `parking` |
+| 18 | `hours` with no shape | `open24h` plus an optional `openingTime`/`closingTime` pair (`HH:MM`, UTC) | the smallest representation that still answers "open at a requested arrival time"; a weekly schedule arrives with the discovery phase |
+| 18 | no base pricing on the facility | optional `hourlyRate` / `dailyMax` scalars | lets a driver page show a rate before the full `pricing` rules group exists; they become "the rule everything else overrides" when it lands |

@@ -52,6 +52,7 @@ TAGS_METADATA = [
     {"name": "auth", "description": "Registration, login, tokens, password reset."},
     {"name": "users", "description": "Profile, preferences, account status."},
     {"name": "vehicles", "description": "User vehicles and default vehicle."},
+    {"name": "facilities", "description": "Parking facility management (operator/admin)."},
     {"name": "parking", "description": "Nearby search, facility details, availability."},
     {"name": "spaces", "description": "Individual spaces, zones and status."},
     {"name": "reservations", "description": "Booking lifecycle and QR entry/exit."},

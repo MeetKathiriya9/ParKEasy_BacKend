@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # cannot be used to grow a single user's documents without bound.
     vehicle_max_per_user: int = 20
 
+    # --- Facilities (DOC sections 7/11/18) ---
+    facility_write_rate_limit: int = 60
+    facility_write_rate_window_seconds: int = 3600
+    # Ceiling on how many facilities one operator account may hold, so the
+    # multi-facility operator (DOC section 8) cannot grow without bound.
+    facility_max_per_operator: int = 50
+
     # --- Password reset ---
     password_reset_expires_minutes: int = 30
     password_reset_token_bytes: int = 32

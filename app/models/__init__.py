@@ -6,6 +6,7 @@ section 17 plus the client-facing role literals.
 """
 
 from app.models.enums import (
+    Amenity,
     ChargerStatus,
     ComplaintStatus,
     EventStatus,
@@ -24,6 +25,7 @@ from app.models.enums import (
 )
 
 __all__ = [
+    "Amenity",
     "ChargerStatus",
     "ComplaintStatus",
     "EventStatus",
