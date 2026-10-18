@@ -76,14 +76,23 @@ _CREATE_RESPONSES: dict[int | str, dict[str, type[Any]]] = {
 }
 
 
-def _to_response(document: dict[str, Any], operator_name: str | None = None) -> FacilityResponse:
-    return FacilityResponse.model_validate(public_facility(document, operator_name))
+def _to_response(
+    document: dict[str, Any],
+    operator_name: str | None = None,
+    space_counts: dict[str, int] | None = None,
+) -> FacilityResponse:
+    return FacilityResponse.model_validate(public_facility(document, operator_name, space_counts))
 
 
 async def _one_response(db: AsyncDatabase, document: dict[str, Any]) -> FacilityResponse:
-    """Serialise a single document, resolving the owning operator's name."""
+    """Serialise a single document, resolving the operator name and space counts."""
     names = await facilities_service.operator_names(db, [document])
-    return _to_response(document, names.get(str(document.get("operatorId"))))
+    counts = await facilities_service.space_counts(db, [document["_id"]])
+    return _to_response(
+        document,
+        names.get(str(document.get("operatorId"))),
+        counts.get(str(document["_id"])),
+    )
 
 
 def _write_throttle(request: Request, user: Any, settings: Settings) -> None:
@@ -127,8 +136,13 @@ async def list_facilities(
         status=status_filter,
     )
     names = await facilities_service.operator_names(db, documents)
+    counts = await facilities_service.space_counts(db, [document["_id"] for document in documents])
     return [
-        _to_response(document, names.get(str(document.get("operatorId"))))
+        _to_response(
+            document,
+            names.get(str(document.get("operatorId"))),
+            counts.get(str(document["_id"])),
+        )
         for document in documents
     ]
 

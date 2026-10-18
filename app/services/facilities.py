@@ -39,8 +39,9 @@ from app.core.errors import (
     ErrorCode,
     NotFoundError,
 )
-from app.models.enums import FacilityStatus, Role
+from app.models.enums import FacilityStatus, Role, SpaceStatus
 from app.models.facility import FACILITIES_COLLECTION, geojson_point, hours_error
+from app.models.space import FLOORS_COLLECTION, SPACES_COLLECTION, ZONES_COLLECTION
 from app.schemas.facility import (
     ChangeFacilityStatusRequest,
     CreateFacilityRequest,
@@ -93,13 +94,15 @@ async def _operator_object_id(db: AsyncDatabase, account_id: str) -> ObjectId:
     return object_id
 
 
-async def _owned_facility(
+async def owned_facility(
     db: AsyncDatabase, *, user_id: str, role: Role, facility_id: str
 ) -> dict[str, Any]:
     """Load a facility the caller may write to, or raise a 404.
 
     Admins reach everything; an operator only their own. Malformed, unknown and
-    foreign ids are indistinguishable on purpose.
+    foreign ids are indistinguishable on purpose. Public because the floors /
+    zones / spaces service scopes every one of its routes through the parent
+    facility.
     """
     object_id = to_object_id(facility_id)
     if object_id is None:
@@ -116,7 +119,7 @@ async def _owned_facility(
     return document
 
 
-async def _visible_facility(
+async def visible_facility(
     db: AsyncDatabase,
     *,
     user_id: str,
@@ -201,6 +204,66 @@ async def operator_names(
     return {str(account["_id"]): account.get("name", "") for account in accounts}
 
 
+# A facility's `capacity` is not stored: it is the count of its spaces. This is
+# the single aggregation that answers both `capacity` and the per-status tally
+# for a page of facilities, so the listing does not turn into an N+1.
+_SPACE_COUNT_KEYS = {
+    SpaceStatus.AVAILABLE.value: "available",
+    SpaceStatus.OCCUPIED.value: "occupied",
+    SpaceStatus.RESERVED.value: "reserved",
+    SpaceStatus.MAINTENANCE.value: "maintenance",
+    SpaceStatus.BLOCKED.value: "blocked",
+}
+
+
+def _empty_counts() -> dict[str, int]:
+    return {
+        "total": 0,
+        "available": 0,
+        "occupied": 0,
+        "reserved": 0,
+        "maintenance": 0,
+        "blocked": 0,
+    }
+
+
+async def space_counts(
+    db: AsyncDatabase, facility_ids: list[Any]
+) -> dict[str, dict[str, int]]:
+    """Map each facility id to its derived `{total, available, occupied, ...}`.
+
+    One aggregation covers every id, so a facility listing stays a constant
+    number of queries. Faculties with no spaces are not in the result; callers
+    default them to zeros.
+    """
+    object_ids = [
+        object_id
+        for object_id in (to_object_id(str(value)) for value in facility_ids)
+        if object_id is not None
+    ]
+    if not object_ids:
+        return {}
+
+    pipeline = [
+        {"$match": {"facilityId": {"$in": object_ids}}},
+        {
+            "$group": {
+                "_id": {"facilityId": "$facilityId", "status": "$status"},
+                "count": {"$sum": 1},
+            }
+        },
+    ]
+    result: dict[str, dict[str, int]] = {}
+    async for row in await db[SPACES_COLLECTION].aggregate(pipeline):
+        key = str(row["_id"]["facilityId"])
+        counts = result.setdefault(key, _empty_counts())
+        counts["total"] += row["count"]
+        bucket = _SPACE_COUNT_KEYS.get(row["_id"].get("status"))
+        if bucket is not None:
+            counts[bucket] += row["count"]
+    return result
+
+
 async def get_facility(
     db: AsyncDatabase,
     *,
@@ -210,7 +273,7 @@ async def get_facility(
     facility_id: str,
 ) -> dict[str, Any]:
     """One facility the caller may read."""
-    return await _visible_facility(
+    return await visible_facility(
         db,
         user_id=user_id,
         role=role,
@@ -263,7 +326,6 @@ async def create_facility(
         "address": payload.address,
         "city": payload.city,
         "location": geojson_point(payload.lat, payload.lng),
-        "capacity": payload.capacity,
         "open24h": payload.open24h,
         "openingTime": payload.openingTime,
         "closingTime": payload.closingTime,
@@ -309,13 +371,13 @@ async def update_facility(
     only flips `open24h` to `false` is refused when the stored times cannot
     carry it.
     """
-    fields = set(payload.model_fields_set) - {"status", "operatorId"}
-    document = await _owned_facility(db, user_id=user_id, role=role, facility_id=facility_id)
+    fields = set(payload.model_fields_set) - {"status", "operatorId", "capacity"}
+    document = await owned_facility(db, user_id=user_id, role=role, facility_id=facility_id)
     if not fields:
         return document, False
 
     updates: dict[str, Any] = {}
-    for field_name in ("name", "address", "city", "description", "capacity"):
+    for field_name in ("name", "address", "city", "description"):
         if field_name in fields:
             updates[field_name] = getattr(payload, field_name)
     for field_name in ("openingTime", "closingTime", "hourlyRate", "dailyMax"):
@@ -372,7 +434,7 @@ async def set_status(
     temporary closure, a deactivation - because the DOC names the states but no
     transition matrix, and the operator dashboard needs all of them.
     """
-    document = await _owned_facility(db, user_id=user_id, role=role, facility_id=facility_id)
+    document = await owned_facility(db, user_id=user_id, role=role, facility_id=facility_id)
     previous = document.get("status")
     if previous == payload.status.value:
         return document, previous
@@ -396,9 +458,11 @@ async def delete_facility(
 
     Refuses with `409 FACILITY_IN_USE` while reservations or sessions still
     reference it: deleting the row would orphan live bookings, and the correct
-    action there is a status change instead.
+    action there is a status change instead. The facility's floors, zones and
+    spaces exist only for it, so they are removed with it rather than left
+    dangling.
     """
-    document = await _owned_facility(db, user_id=user_id, role=role, facility_id=facility_id)
+    document = await owned_facility(db, user_id=user_id, role=role, facility_id=facility_id)
     facility_oid = document["_id"]
     # `$in` with both spellings so the check works whether the referencing
     # collections store the id as an ObjectId (the convention here) or as the
@@ -419,6 +483,10 @@ async def delete_facility(
     if result.deleted_count == 0:
         raise NotFoundError(FACILITY_NOT_FOUND)
 
+    # Cascade: everything below a facility is meaningless without it.
+    for collection in (SPACES_COLLECTION, ZONES_COLLECTION, FLOORS_COLLECTION):
+        await db[collection].delete_many(reference)
+
     logger.info("Deleted facility %s", facility_id)
     return document
 
@@ -429,6 +497,10 @@ __all__ = [
     "delete_facility",
     "get_facility",
     "list_facilities",
+    "operator_names",
+    "owned_facility",
     "set_status",
+    "space_counts",
     "update_facility",
+    "visible_facility",
 ]

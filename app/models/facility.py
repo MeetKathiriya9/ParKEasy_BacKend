@@ -124,7 +124,6 @@ class FacilityDocument(TypedDict):
     address: str
     city: str | None
     location: dict[str, Any]
-    capacity: int
     open24h: bool
     openingTime: str | None
     closingTime: str | None
@@ -141,13 +140,21 @@ def geojson_point(lat: float, lng: float) -> dict[str, Any]:
     return {"type": "Point", "coordinates": [lng, lat]}
 
 
-def public_facility(document: dict[str, Any], operator_name: str | None = None) -> dict[str, Any]:
+def public_facility(
+    document: dict[str, Any],
+    operator_name: str | None = None,
+    space_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
     """Project a facility document down to the fields safe to send to a client.
 
     `lat`/`lng` are unwrapped from the GeoJSON `location`, and the three
     amenity flags plus `isOpenNow` are derived rather than stored. The owning
     account's display name is not part of the document (only `operatorId` is),
     so callers resolve it from the `users` collection and pass it in.
+
+    `capacity` and `spaceCounts` are likewise derived from the `parkingSpaces`
+    collection (see `app.services.facilities.space_counts`) and passed in; when
+    absent, the facility is treated as having no spaces yet.
     """
     location = document.get("location") or {}
     coordinates = location.get("coordinates") or []
@@ -155,6 +162,7 @@ def public_facility(document: dict[str, Any], operator_name: str | None = None) 
     lat = coordinates[1] if len(coordinates) > 1 else None
 
     amenities = list(document.get("amenities") or [])
+    counts = space_counts or {}
     return {
         "id": str(document["_id"]),
         "operatorId": str(document["operatorId"]),
@@ -165,7 +173,15 @@ def public_facility(document: dict[str, Any], operator_name: str | None = None) 
         "city": document.get("city"),
         "lat": lat,
         "lng": lng,
-        "capacity": document.get("capacity"),
+        "capacity": int(counts.get("total", 0)),
+        "spaceCounts": {
+            "total": int(counts.get("total", 0)),
+            "available": int(counts.get("available", 0)),
+            "occupied": int(counts.get("occupied", 0)),
+            "reserved": int(counts.get("reserved", 0)),
+            "maintenance": int(counts.get("maintenance", 0)),
+            "blocked": int(counts.get("blocked", 0)),
+        },
         "open24h": bool(document.get("open24h", True)),
         "openingTime": document.get("openingTime"),
         "closingTime": document.get("closingTime"),

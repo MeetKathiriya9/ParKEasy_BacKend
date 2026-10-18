@@ -78,6 +78,17 @@ class Settings(BaseSettings):
     # multi-facility operator (DOC section 8) cannot grow without bound.
     facility_max_per_operator: int = 50
 
+    # --- Floors, zones and spaces (DOC sections 7/11/18) ---
+    space_write_rate_limit: int = 120
+    space_write_rate_window_seconds: int = 3600
+    # Ceilings on the Facility -> Floor -> Zone -> Space hierarchy so one
+    # facility (or one bulk call) cannot grow without bound. `spaces_bulk_max`
+    # caps a single bulk-create request; `space_max_per_zone` caps the zone.
+    floor_max_per_facility: int = 50
+    zone_max_per_floor: int = 100
+    space_max_per_zone: int = 1000
+    spaces_bulk_max: int = 500
+
     # --- Password reset ---
     password_reset_expires_minutes: int = 30
     password_reset_token_bytes: int = 32

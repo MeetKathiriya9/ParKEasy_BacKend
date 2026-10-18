@@ -49,6 +49,14 @@ class SpaceType(StrEnum):
     ACCESSIBLE = "accessible"
 
 
+class ZoneStatus(StrEnum):
+    """A zone's open/closed state (DOC section 11.169 "close or reopen
+    facility/zone"). Closing a zone blocks its spaces without deleting them."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
 class Amenity(StrEnum):
     """Facility amenities (DOC section 18 lists the field, not the vocabulary).
 

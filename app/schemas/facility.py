@@ -1,14 +1,17 @@
 """Request and response bodies for the `facilities` group (DOC sections 7/11/18).
 
 The writable surface mirrors DOC section 18's key fields - `name`, `address`,
-geo location (`lat`/`lng`), `capacity`, hours, `amenities` - plus the optional
-base rates and a free-text `description`/`city` that the driver pages render.
+geo location (`lat`/`lng`), hours, `amenities` - plus the optional base rates
+and a free-text `description`/`city` that the driver pages render.
 
 Not request fields, by design:
 
 * `status` - a first-class transition on `PATCH /facilities/{id}/status`, so a
   casual edit cannot silently close a garage. Sending it answers a `422` that
   names the endpoint, exactly like a vehicle's `isDefault`.
+* `capacity` - derived from the facility's spaces (the Facility -> Floor ->
+  Zone -> Space hierarchy), so it is read-only and sending it answers a `422`;
+  `spaceCounts` reports the per-status tally.
 * `operatorId` - ownership comes from the token. An admin may pass it on
   `POST` to create a facility on another operator's behalf; anyone else
   sending it gets a `422`, and it is never re-assignable afterwards.
@@ -26,18 +29,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.models.enums import Amenity, FacilityStatus
 from app.models.facility import (
     MAX_ADDRESS_LENGTH,
-    MAX_CAPACITY,
     MAX_CITY_LENGTH,
     MAX_DAILY_MAX,
     MAX_DESCRIPTION_LENGTH,
     MAX_HOURLY_RATE,
     MAX_NAME_LENGTH,
     MIN_ADDRESS_LENGTH,
-    MIN_CAPACITY,
     MIN_NAME_LENGTH,
     hours_error,
     time_is_valid,
 )
+from app.schemas.space import SpaceCounts
 
 NAME_HINT = f"name must be {MIN_NAME_LENGTH}-{MAX_NAME_LENGTH} characters"
 ADDRESS_HINT = f"address must be {MIN_ADDRESS_LENGTH}-{MAX_ADDRESS_LENGTH} characters"
@@ -62,7 +64,6 @@ class CreateFacilityRequest(BaseModel):
     city: str | None = None
     lat: float = Field(ge=-90.0, le=90.0)
     lng: float = Field(ge=-180.0, le=180.0)
-    capacity: int = Field(ge=MIN_CAPACITY, le=MAX_CAPACITY)
     open24h: bool = True
     openingTime: str | None = None
     closingTime: str | None = None
@@ -70,6 +71,10 @@ class CreateFacilityRequest(BaseModel):
     description: str | None = None
     hourlyRate: float | None = Field(default=None, gt=0.0, le=MAX_HOURLY_RATE)
     dailyMax: float | None = Field(default=None, gt=0.0, le=MAX_DAILY_MAX)
+    # Derived from the facility's spaces, so not writable. Declared only so the
+    # validator below can answer a readable `422` instead of the bare
+    # "extra inputs are not permitted".
+    capacity: int | None = None
     # Declared only so the service can answer a 422 for non-admin callers with
     # a readable message; a bare `extra="forbid"` failure would just say
     # "extra inputs are not permitted" and leave the caller guessing.
@@ -135,6 +140,11 @@ class CreateFacilityRequest(BaseModel):
 
     @model_validator(mode="after")
     def _hours_are_coherent(self) -> CreateFacilityRequest:
+        if self.capacity is not None:
+            raise ValueError(
+                "capacity is derived from the facility's spaces and cannot be set; "
+                "add floors, zones and spaces instead"
+            )
         error = hours_error(self.open24h, self.openingTime, self.closingTime)
         if error is not None:
             raise ValueError(error)
@@ -227,15 +237,6 @@ class UpdateFacilityRequest(BaseModel):
             raise ValueError("lng must be between -180 and 180")
         return value
 
-    @field_validator("capacity")
-    @classmethod
-    def _capacity(cls, value: int | None) -> int | None:
-        if value is None:
-            return None
-        if not MIN_CAPACITY <= value <= MAX_CAPACITY:
-            raise ValueError(f"capacity must be {MIN_CAPACITY}-{MAX_CAPACITY}")
-        return value
-
     @field_validator("hourlyRate")
     @classmethod
     def _hourly_rate(cls, value: float | None) -> float | None:
@@ -284,8 +285,12 @@ class UpdateFacilityRequest(BaseModel):
             raise ValueError("status is not writable here; use PATCH /facilities/{id}/status")
         if "operatorId" in fields:
             raise ValueError("operatorId cannot be changed")
+        if "capacity" in fields:
+            raise ValueError(
+                "capacity is derived from the facility's spaces and cannot be set"
+            )
 
-        for field_name in ("name", "address", "lat", "lng", "capacity", "open24h", "amenities"):
+        for field_name in ("name", "address", "lat", "lng", "open24h", "amenities"):
             if field_name in fields and getattr(self, field_name) is None:
                 raise ValueError(f"{field_name} cannot be null")
 
@@ -332,6 +337,7 @@ class FacilityResponse(BaseModel):
     lat: float | None = None
     lng: float | None = None
     capacity: int
+    spaceCounts: SpaceCounts = Field(default_factory=SpaceCounts)
     open24h: bool
     openingTime: str | None = None
     closingTime: str | None = None

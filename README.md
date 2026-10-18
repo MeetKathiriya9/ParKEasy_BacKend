@@ -361,10 +361,11 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities -Headers $h
 
 Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities -Method Post -Headers $h `
   -ContentType 'application/json' `
-  -Body '{"name":"CHARUSAT Central Lot","address":"CHARUSAT Campus, Changa","lat":22.9922,"lng":72.6667,"capacity":120,"amenities":["ev_charging","covered"]}'
+  -Body '{"name":"CHARUSAT Central Lot","address":"CHARUSAT Campus, Changa","lat":22.9922,"lng":72.6667,"amenities":["ev_charging","covered"]}'
 
+# capacity is derived from the facility's spaces, so it is not a writable field.
 Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities/<id> -Method Patch -Headers $h `
-  -ContentType 'application/json' -Body '{"capacity":150}'
+  -ContentType 'application/json' -Body '{"name":"CHARUSAT Central Lot (North)"}'
 
 # DOC section 11.169: status is a first-class transition, not a PATCH field.
 Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities/<id>/status -Method Patch -Headers $h `
@@ -413,6 +414,88 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities/<id> -Method Delete -H
   is not, because dashboards poll it.
 - **A ceiling** of `FACILITY_MAX_PER_OPERATOR` facilities per operator answers
   `409 FACILITY_LIMIT_REACHED` instead of accepting more.
+- **`capacity` is derived, not stored.** It is the count of the facility's
+  parking spaces, computed at the API boundary and returned alongside
+  `spaceCounts` (`total` / `available` / `occupied` / `reserved` /
+  `maintenance` / `blocked`). Sending `capacity` on create or edit is a `422`
+  pointing you at the spaces group - capacity rises when a space is added and
+  falls when one is deleted, so a second stored copy would only drift.
+
+### Parking spaces (DOC sections 7.79, 11.169, 18, 33)
+
+Eleven endpoints under `/api/v1` - the operator/staff setup of a facility's
+layout: Facility -> Floor -> Zone -> Space. This is what fills the derived
+`capacity` above. Drivers do not write here; their window onto spaces is
+`/parking`, and the availability a driver sees is the same `status` field
+ maintained by these endpoints and the reservation engine.
+
+| Method | Path | Roles | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/facilities/{id}/floors` | operator, admin, staff | layout tree (floors with their zones) |
+| `POST` | `/facilities/{id}/floors` | operator, admin | add a floor (`201`) |
+| `PATCH` | `/floors/{id}` | operator, admin | rename / re-level |
+| `DELETE` | `/floors/{id}` | operator, admin | remove, cascading zones + spaces (`204`) |
+| `POST` | `/floors/{id}/zones` | operator, admin | add a zone (`201`) |
+| `PATCH` | `/zones/{id}` | operator, admin | rename |
+| `PATCH` | `/zones/{id}/status` | operator, admin | close / reopen a zone |
+| `DELETE` | `/zones/{id}` | operator, admin | remove, cascading spaces (`204`) |
+| `GET` | `/zones/{id}/spaces` | operator, admin, staff | list one zone's spaces |
+| `POST` | `/zones/{id}/spaces` | operator, admin | add one space (`201`) |
+| `POST` | `/zones/{id}/spaces/bulk` | operator, admin | add a run such as `A-01`..`A-50` (`201`) |
+| `GET` | `/facilities/{id}/spaces` | operator, admin, staff | list, optionally by `floorId` / `status` |
+| `GET` | `/spaces/{id}` | operator, admin, staff | read one |
+| `PATCH` | `/spaces/{id}` | operator, admin | edit label / type / reservable |
+| `PATCH` | `/spaces/{id}/status` | operator, admin, staff | mark available / maintenance / blocked |
+| `DELETE` | `/spaces/{id}` | operator, admin | remove (`204`) |
+
+```powershell
+$h = @{ Authorization = "Bearer $token" }
+
+# Build the tree, then bulk-fill a zone with A-01..A-50 in one request.
+$floors = Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities/<id>/floors -Headers $h
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/zones/<zoneId>/spaces/bulk -Method Post `
+  -Headers $h -ContentType 'application/json' `
+  -Body '{"prefix":"A-","start":1,"count":50}'
+
+# A space's status is a first-class transition, not a PATCH field.
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/spaces/<spaceId>/status -Method Patch -Headers $h `
+  -ContentType 'application/json' -Body '{"status":"MAINTENANCE","reason":"Bollard broken"}'
+```
+
+**How it works**
+
+- **Staff may read and change space status, nothing else.** A staff token sees
+  the facilities assigned to it and may flip a space to `AVAILABLE`,
+  `MAINTENANCE` or `BLOCKED` there (DOC section 10.151); creating, renaming or
+  deleting the structure is the operator's job and answers `403`.
+- **Labels are unique within a zone, not globally.** `A-01` may exist in both
+  Zone A and Zone B; the same number twice in one zone is a `409
+  SPACE_DUPLICATE`, and a bulk run is validated before the insert so a clash
+  creates nothing rather than half a run.
+- **Renaming a parent rewrites the snapshots in one pass.** Each space stores
+  `floorName`/`zoneName` beside its ids so a grid or a report needs no joins;
+  renaming a floor or zone runs one `update_many` to keep them honest.
+- **A space cannot be moved between zones** by a PATCH - that is a
+  delete-and-recreate, not a silent reparent, so the ids never quietly
+  disagree with what is painted on the wall.
+- **A space's `status` may only be set to `AVAILABLE`, `MAINTENANCE` or
+  `BLOCKED`.** `OCCUPIED` and `RESERVED` belong to the reservation engine (DOC
+  sections 16-17) and answer a `422` here, so a person cannot mark a space
+  free while the engine thinks it is booked.
+- **Closing a zone blocks its open spaces** and reopening restores them - the
+  same close/reopen idea as the facility, one level down, with a reason that
+  travels on the audit row.
+- **Deletes cascade.** Removing a floor removes its zones and spaces; removing
+  a zone removes its spaces. Deleting a facility removes all three collections
+  in one pass, so no orphaned space can keep counting toward a capacity.
+- **Audited** as `FLOOR_*`, `ZONE_*`, `ZONE_STATUS_CHANGED`, `SPACE_CREATED`,
+  `SPACES_BULK_CREATED`, `SPACE_UPDATED`, `SPACE_DELETED` and
+  `SPACE_STATUS_CHANGED`.
+- **Writes are rate limited** per operator (`SPACE_WRITE_RATE_LIMIT`); reads
+  are not.
+- **Ceilings** (`FLOOR_MAX_PER_FACILITY`, `ZONE_MAX_PER_FLOOR`,
+  `SPACE_MAX_PER_ZONE`, `SPACES_BULK_MAX`) answer `409` rather than growing a
+  layout without bound.
 
 ### How it works (general)
 
@@ -453,6 +536,11 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/facilities/<id> -Method Delete -H
 | `VEHICLE_MAX_PER_USER` | `20` | vehicles per account; the ceiling answers `409` |
 | `FACILITY_WRITE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `60` / `3600` | per operator; create / edit / delete / status |
 | `FACILITY_MAX_PER_OPERATOR` | `50` | facilities per operator; the ceiling answers `409` |
+| `SPACE_WRITE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `120` / `3600` | per operator; floors / zones / spaces writes |
+| `FLOOR_MAX_PER_FACILITY` | `50` | floors per facility; the ceiling answers `409` |
+| `ZONE_MAX_PER_FLOOR` | `100` | zones per floor; the ceiling answers `409` |
+| `SPACE_MAX_PER_ZONE` | `1000` | spaces per zone; the ceiling answers `409` |
+| `SPACES_BULK_MAX` | `500` | largest single bulk run; the ceiling answers `422` |
 | `AVATAR_MAX_BYTES` | `2097152` | 2 MB ceiling on the uploaded file, checked before decoding |
 | `AVATAR_MAX_DIMENSION` / `AVATAR_JPEG_QUALITY` | `512` / `82` | what every upload is re-encoded to |
 | `AVATAR_DIR` | `uploads/avatars` | where stored JPEGs live; relative to `Server/`, gitignored |

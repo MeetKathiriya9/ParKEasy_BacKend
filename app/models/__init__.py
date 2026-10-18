@@ -22,6 +22,7 @@ from app.models.enums import (
     UserStatus,
     ViolationStatus,
     ViolationType,
+    ZoneStatus,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "UserStatus",
     "ViolationStatus",
     "ViolationType",
+    "ZoneStatus",
 ]

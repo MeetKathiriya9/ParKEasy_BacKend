@@ -47,13 +47,36 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
         IndexModel([("status", ASCENDING)], name="status_1"),
         IndexModel([("name", ASCENDING)], name="name_1"),
     ],
-    "parkingSpaces": [
+    "floors": [
+        # A floor name is unique within its facility, so two "Level 2"s cannot
+        # be created side by side.
         IndexModel(
-            [("facilityId", ASCENDING), ("spaceNumber", ASCENDING)],
+            [("facilityId", ASCENDING), ("name", ASCENDING)],
             unique=True,
-            name="uniq_facility_space",
+            name="uniq_facility_floor",
+        ),
+        IndexModel([("facilityId", ASCENDING), ("level", ASCENDING)], name="facility_level_1"),
+    ],
+    "zones": [
+        IndexModel(
+            [("floorId", ASCENDING), ("name", ASCENDING)],
+            unique=True,
+            name="uniq_floor_zone",
         ),
         IndexModel([("facilityId", ASCENDING), ("status", ASCENDING)], name="facility_status_1"),
+        IndexModel([("facilityId", ASCENDING), ("floorId", ASCENDING)], name="facility_floor_1"),
+    ],
+    "parkingSpaces": [
+        # Space numbers are unique *within a zone*, because two zones may each
+        # hold an "A01". Supersedes the old flat (facilityId, spaceNumber) index.
+        IndexModel(
+            [("zoneId", ASCENDING), ("spaceNumber", ASCENDING)],
+            unique=True,
+            name="uniq_zone_space",
+        ),
+        IndexModel([("facilityId", ASCENDING), ("status", ASCENDING)], name="facility_status_1"),
+        IndexModel([("facilityId", ASCENDING), ("floorId", ASCENDING)], name="facility_floor_1"),
+        IndexModel([("facilityId", ASCENDING), ("zoneId", ASCENDING)], name="facility_zone_1"),
     ],
     "reservations": [
         IndexModel(
@@ -159,9 +182,29 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
     ],
 }
 
+# Indexes this project used to declare and no longer does. `create_indexes`
+# never removes anything, so a unique index that has been superseded would
+# otherwise stay enforced forever and keep rejecting valid documents. Dropped
+# (best effort) by `ensure_indexes`.
+SUPERSEDED_INDEXES: dict[str, list[str]] = {
+    # `parkingSpaces` moved from a flat (facilityId, spaceNumber) key to the
+    # zone-scoped `uniq_zone_space`; the old unique index would forbid the same
+    # label in two different zones.
+    "parkingSpaces": ["uniq_facility_space"],
+}
+
 
 async def ensure_indexes(db: AsyncDatabase) -> None:
     """Create every index defined in `INDEX_SPECS`. Idempotent and safe to re-run."""
+    for collection_name, names in SUPERSEDED_INDEXES.items():
+        for index_name in names:
+            try:
+                await db[collection_name].drop_index(index_name)
+                logger.info("Dropped superseded index '%s' on '%s'", index_name, collection_name)
+            except Exception:
+                # Usually OperationFailure "index not found" - expected on a
+                # fresh database, so this stays quiet.
+                logger.debug("Superseded index '%s' not present to drop", index_name)
     for collection_name, models in INDEX_SPECS.items():
         try:
             await db[collection_name].create_indexes(models)

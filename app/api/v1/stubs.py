@@ -81,7 +81,31 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
         "Parking discovery: nearby search, details, filters",
         ("GET /nearby", "GET /search", "GET /{id}", "GET /{id}/availability"),
     ),
-    RouteGroupSpec("spaces", "Spaces, availability and status", ("GET /", "PATCH /{id}/status")),
+    RouteGroupSpec(
+        "spaces",
+        "Spaces, availability and status",
+        (
+            "GET /facilities/{id}/floors",
+            "POST /facilities/{id}/floors",
+            "PATCH /floors/{id}",
+            "DELETE /floors/{id}",
+            "POST /floors/{id}/zones",
+            "PATCH /zones/{id}",
+            "DELETE /zones/{id}",
+            "PATCH /zones/{id}/status",
+            "GET /zones/{id}/spaces",
+            "POST /zones/{id}/spaces",
+            "POST /zones/{id}/spaces/bulk",
+            "GET /facilities/{id}/spaces",
+            "GET /spaces/{id}",
+            "PATCH /spaces/{id}",
+            "DELETE /spaces/{id}",
+            "PATCH /spaces/{id}/status",
+        ),
+        # The Facility -> Floor -> Zone -> Space tree lives in
+        # app/api/v1/spaces.py; availability search is the `parking` group.
+        implemented=True,
+    ),
     RouteGroupSpec(
         "reservations",
         "Reservation lifecycle",
