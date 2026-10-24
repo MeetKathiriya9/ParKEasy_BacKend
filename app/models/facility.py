@@ -7,6 +7,10 @@ geo location, `capacity`, `hours`, `amenities`. Two deliberate extensions:
   facility's default price, so a driver page can show a rate before the full
   pricing-rules group (DOC section 21, `/api/pricing`) exists. When that group
   lands these become "the rule everything else overrides".
+* **A summary rating.** `rating` (0-5) and `reviewCount` are optional scalars
+  holding the facility's current standing, so a search result can show a star
+  before the reviews group (DOC section 21, `/api/reviews`) exists. When that
+  group lands these become the cached aggregate it writes.
 * **Structured hours.** DOC asks for `hours` without a shape. `open24h` plus an
   optional `openingTime`/`closingTime` pair ("HH:MM", UTC) is the smallest
   representation that still answers DOC section 20's "find facilities open at a
@@ -46,6 +50,10 @@ MAX_CAPACITY = 10_000
 MIN_HOURLY_RATE = 0.0
 MAX_HOURLY_RATE = 10_000.0
 MAX_DAILY_MAX = 100_000.0
+# A five-point scale, rounded to one decimal by the schema.
+MIN_RATING = 0.0
+MAX_RATING = 5.0
+MAX_REVIEW_COUNT = 10_000_000
 
 # "HH:MM" on the 24-hour clock, no seconds, no date part.
 TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
@@ -130,6 +138,8 @@ class FacilityDocument(TypedDict):
     amenities: list[str]
     hourlyRate: float | None
     dailyMax: float | None
+    rating: float | None
+    reviewCount: int | None
     status: str
     createdAt: datetime
     updatedAt: datetime
@@ -192,6 +202,8 @@ def public_facility(
         "isOpenNow": is_open_now(document),
         "hourlyRate": document.get("hourlyRate"),
         "dailyMax": document.get("dailyMax"),
+        "rating": document.get("rating"),
+        "reviewCount": document.get("reviewCount"),
         "status": document.get("status", FacilityStatus.ACTIVE.value),
         "createdAt": as_utc(document.get("createdAt")),
         "updatedAt": as_utc(document.get("updatedAt")),
@@ -206,9 +218,12 @@ __all__ = [
     "MAX_DESCRIPTION_LENGTH",
     "MAX_HOURLY_RATE",
     "MAX_NAME_LENGTH",
+    "MAX_RATING",
+    "MAX_REVIEW_COUNT",
     "MIN_ADDRESS_LENGTH",
     "MIN_CAPACITY",
     "MIN_NAME_LENGTH",
+    "MIN_RATING",
     "TIME_PATTERN",
     "FacilityDocument",
     "geojson_point",

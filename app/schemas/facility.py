@@ -17,6 +17,10 @@ Not request fields, by design:
   sending it gets a `422`, and it is never re-assignable afterwards.
 * `hasEV` / `hasCovered` / `hasAccessible` / `isOpenNow` / `location` - derived
   at the API boundary (see `app.models.facility.public_facility`).
+
+`rating` and `reviewCount` are the facility's standing on the five-point scale.
+They are writable for now so a driver page can show a star; the reviews group
+will own them once DOC section 21's `/api/reviews` exists.
 """
 
 from __future__ import annotations
@@ -34,8 +38,11 @@ from app.models.facility import (
     MAX_DESCRIPTION_LENGTH,
     MAX_HOURLY_RATE,
     MAX_NAME_LENGTH,
+    MAX_RATING,
+    MAX_REVIEW_COUNT,
     MIN_ADDRESS_LENGTH,
     MIN_NAME_LENGTH,
+    MIN_RATING,
     hours_error,
     time_is_valid,
 )
@@ -71,6 +78,11 @@ class CreateFacilityRequest(BaseModel):
     description: str | None = None
     hourlyRate: float | None = Field(default=None, gt=0.0, le=MAX_HOURLY_RATE)
     dailyMax: float | None = Field(default=None, gt=0.0, le=MAX_DAILY_MAX)
+    # The facility's standing on the five-point scale. Written by the operator
+    # for now; the reviews group will own it once DOC section 21's `/api/reviews`
+    # lands, and until then it is simply the number the driver page shows.
+    rating: float | None = Field(default=None, ge=MIN_RATING, le=MAX_RATING)
+    reviewCount: int | None = Field(default=None, ge=0, le=MAX_REVIEW_COUNT)
     # Derived from the facility's spaces, so not writable. Declared only so the
     # validator below can answer a readable `422` instead of the bare
     # "extra inputs are not permitted".
@@ -174,6 +186,8 @@ class UpdateFacilityRequest(BaseModel):
     amenities: list[Amenity] | None = None
     hourlyRate: float | None = None
     dailyMax: float | None = None
+    rating: float | None = None
+    reviewCount: int | None = None
     # Declared only so the 422s below can name the endpoints that do handle
     # them; the general update route refuses both.
     status: FacilityStatus | None = None
@@ -264,6 +278,24 @@ class UpdateFacilityRequest(BaseModel):
             raise ValueError(TIME_HINT)
         return value
 
+    @field_validator("rating")
+    @classmethod
+    def _rating(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if not MIN_RATING <= value <= MAX_RATING:
+            raise ValueError(f"rating must be between {MIN_RATING} and {MAX_RATING}")
+        return value
+
+    @field_validator("reviewCount")
+    @classmethod
+    def _review_count(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if not 0 <= value <= MAX_REVIEW_COUNT:
+            raise ValueError(f"reviewCount must be between 0 and {MAX_REVIEW_COUNT}")
+        return value
+
     @field_validator("amenities")
     @classmethod
     def _amenities(cls, value: list[Amenity] | None) -> list[Amenity] | None:
@@ -348,6 +380,8 @@ class FacilityResponse(BaseModel):
     isOpenNow: bool
     hourlyRate: float | None = None
     dailyMax: float | None = None
+    rating: float | None = None
+    reviewCount: int | None = None
     status: FacilityStatus
     createdAt: datetime | None = None
     updatedAt: datetime | None = None

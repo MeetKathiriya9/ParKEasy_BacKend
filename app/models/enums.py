@@ -1,9 +1,18 @@
 """Enumerations from DOC section 17 ("Suggested Parking States").
 
-Values are stored in MongoDB using the exact uppercase spelling from the
-requirements document, because operators and the client UI both read these
-strings. The lowercase client literals in `Client/src/types/index.ts` are
-mapped onto these at the API boundary (see `app/schemas/common.py`).
+The spelling of each value is the wire format, and MongoDB stores it verbatim.
+There is no mapping layer between the server and the client: the two spellings
+that exist are deliberate, not a pair of equivalents.
+
+* **Uppercase** for the state-like enums a status is read from - `SpaceStatus`,
+  `ZoneStatus`, `FacilityStatus`, `UserStatus`, `ReservationStatus` and the
+  rest. These are the exact DOC section 17 spellings.
+* **Lowercase** for the vocabulary-like enums that name a thing - `SpaceType`,
+  `Amenity`, `VehicleType`, `FuelType`, `Role` and the rest. These are the
+  spellings the DOC section 18 field lists use.
+
+`Client/src/types/index.ts` mirrors both sets exactly, so a literal typed in
+the client is the literal stored in the document.
 """
 
 from __future__ import annotations

@@ -79,7 +79,17 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
     RouteGroupSpec(
         "parking",
         "Parking discovery: nearby search, details, filters",
-        ("GET /nearby", "GET /search", "GET /{id}", "GET /{id}/availability"),
+        (
+            "GET /nearby",
+            "GET /{id}",
+            "GET /{id}/availability",
+            "GET /{id}/spaces",
+        ),
+        # Nearby search, details, availability and the driver-scoped spaces
+        # read live in app/api/v1/parking.py. DOC section 21 also lists
+        # `GET /search`; it is not needed yet, because the client resolves a
+        # free-text destination to coordinates and calls `/nearby`.
+        implemented=True,
     ),
     RouteGroupSpec(
         "spaces",

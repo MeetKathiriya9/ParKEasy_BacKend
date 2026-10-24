@@ -10,8 +10,9 @@ The health probes, MongoDB connectivity, index bootstrap, error envelope, CORS
 and WebSocket channel are in place, and the full route surface is documented.
 
 **Authentication is live** for all four roles from DOC section 12 - register,
-login, current-user and logout. **Profile, vehicles and facility management are
-live** for the signed-in user. **Every other business endpoint still returns
+login, current-user and logout. **Profile, vehicles, facility management, the
+Facility -> Floor -> Zone -> Space layout and parking discovery are live** for
+the signed-in user. **Every other business endpoint still returns
 `501 Not Implemented`** until its phase lands.
 
 | Area | State |
@@ -22,7 +23,15 @@ live** for the signed-in user. **Every other business endpoint still returns
 | `users` - the signed-in user's own profile and photo | done |
 | `vehicles` - list / create / edit / delete / set default | done |
 | `facilities` - operator/admin CRUD plus the status transition | done |
-| Remaining DOC section 21 groups (parking, spaces, reservations, ...) | `501` |
+| `spaces` - floors / zones / spaces, the Facility -> Floor -> Zone -> Space tree | done |
+| `parking` - nearby search, facility details, availability, driver spaces | done |
+| Remaining DOC section 21 groups (reservations, payments, reviews, ...) | `501` |
+
+The React client consumes the live groups: the driver's search page, facility
+page and "Parking Near You" dashboard strip are wired to `parking`, and the
+operator's facility form writes `rating` and `reviewCount`. Everything the
+client shows from a `501` group is labelled as not switched on yet rather
+than faked.
 
 ## Requirements
 
@@ -497,6 +506,99 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/spaces/<spaceId>/status -Method P
   `SPACE_MAX_PER_ZONE`, `SPACES_BULK_MAX`) answer `409` rather than growing a
   layout without bound.
 
+### Parking discovery (DOC sections 7, 19, 20, 21, 22)
+
+Four endpoints under `/api/v1/parking` - the driver-facing window onto
+facilities. Read-only, and open to every signed-in role: the management group
+above is where the role check bites.
+
+| Method | Path | Roles | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/parking/nearby` | any role | facilities around a point, with filters, sorting and pagination |
+| `GET` | `/parking/{id}` | any role | one facility, with its live availability |
+| `GET` | `/parking/{id}/availability` | any role | the per-status space tally |
+| `GET` | `/parking/{id}/spaces` | any role | the facility's spaces, for the layout grid |
+
+```powershell
+$h = @{ Authorization = "Bearer $token" }
+
+# The search centre arrives as coordinates, so the server never has to guess
+# which city a free-text query meant. The client turns "near me", a typed
+# address or a dropped map pin into a point before it calls this.
+$body = Invoke-RestMethod 'http://127.0.0.1:9999/api/v1/parking/nearby?lat=22.5561&lng=72.9242&radiusKm=5&sort=distance&minAvailable=1' -Headers $h
+$body.items | Select-Object name, distanceMeters, @{n='free';e={$_.spaceCounts.available}}
+$body.meta.total
+
+# Filters: minAvailable, maxPrice, ev, covered, accessible, openNow, spaceType.
+# Sorts: distance (default), price, availability, rating.
+Invoke-RestMethod 'http://127.0.0.1:9999/api/v1/parking/nearby?lat=22.5561&lng=72.9242&spaceType=ev&maxPrice=30&sort=price' -Headers $h
+
+# One facility, and the numbers behind a search row.
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/parking/<id> -Headers $h
+Invoke-RestMethod http://127.0.0.1:9999/api/v1/parking/<id>/availability -Headers $h
+```
+
+**How it works**
+
+- **The distance is measured by the database.** A `$geoNear` stage over the
+  `2dsphere` index returns the `ACTIVE` facilities with `distanceMeters`
+  already computed, so the client never has to work out how far away a place
+  is.
+- **The radius orders the results, it does not hide the rest.** Facilities
+  inside `radiusKm` (default 5 km) are the first tier and are listed before
+  anything farther away; the facilities outside the radius follow, nearest
+  first. So a radius with one match puts that one on top and fills the
+  remaining rows with the nearest garages beyond it, and a driver far from
+  every garage still gets a full page. `$geoNear` therefore takes no
+  `maxDistance` - the tier below the radius needs the rows it would have
+  discarded.
+- **A closed facility is not an alternative to itself.** Only `ACTIVE`
+  facilities are candidates, which is what DOC section 22's "find alternative
+  facilities when a facility is closed" is asking for.
+- **Two filter rules are worth knowing.** A facility with no published
+  `hourlyRate` is excluded by `maxPrice` rather than counted as free, and
+  `spaceType` matches only when the facility has an *available* space of that
+  type - a garage full of blocked EV bays is not an EV facility as far as the
+  search is concerned.
+- **Availability is read in bulk.** One aggregation answers the per-status
+  tally and the per-type breakdown for every candidate at once, so a search
+  of forty facilities costs three queries, not forty.
+- **`meta.total` counts everything that matched**, not just the rows on this
+  page, so the client can page honestly.
+- **The availability and the search agree**, because both use the same
+  `is_open_now` rule. That rule compares the facility's hours against **UTC**,
+  since the document carries no timezone yet; the discovery phase adds one.
+- **`rating` and `reviewCount`** ride along on the facility, so a search row
+  can show a star before the reviews group (DOC section 21) exists.
+
+**Client wiring**
+
+| Client file | Talks to |
+| --- | --- |
+| `Client/src/lib/endpoints.ts` | the four paths above |
+| `Client/src/lib/parking.ts` | `searchNearbyParking`, `fetchParkingFacility`, `fetchParkingAvailability`, `fetchParkingSpaces` |
+| `Client/src/lib/geo.ts` | turns "near me", a typed address or a dropped pin into the `lat`/`lng` the search needs |
+| `Client/src/pages/driver/DriverSearch.tsx` | the search page: centre, filters, sort, paging, result rows |
+| `Client/src/pages/driver/DriverFacility.tsx` | one facility: live counts, the floor/zone space grid, pricing |
+| `Client/src/pages/driver/DriverDashboard.tsx` | the "Parking Near You" strip (radius 5 km, sorted by availability) |
+| `Client/src/pages/operator/OperatorFacilities.tsx` | writes `rating` and `reviewCount` |
+
+The client sends the space status literals in the uppercase wire spelling
+(`AVAILABLE`, `OCCUPIED`, ...) exactly as they come back from
+`/parking/{id}/spaces`; `Client/src/types/index.ts` declares them that way.
+The per-status *counts* on `spaceCounts` stay lowercase (`available`,
+`occupied`), because they are keys of a tally rather than a stored status.
+
+**Demo data**
+
+```powershell
+# Twelve facilities with floors, zones and spaces around the client's default
+# map view, plus an operator and a driver account to sign in with.
+.venv\Scripts\python.exe -m scripts.seed_demo --reset
+```
+
+Password for both demo accounts is `parkeasy123`.
+
 ### How it works (general)
 
 - **Passwords** are hashed with `bcrypt` (cost 12) via `app/core/security.py`.
@@ -541,6 +643,10 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/spaces/<spaceId>/status -Method P
 | `ZONE_MAX_PER_FLOOR` | `100` | zones per floor; the ceiling answers `409` |
 | `SPACE_MAX_PER_ZONE` | `1000` | spaces per zone; the ceiling answers `409` |
 | `SPACES_BULK_MAX` | `500` | largest single bulk run; the ceiling answers `422` |
+| `PARKING_SEARCH_RATE_LIMIT` / `..._WINDOW_SECONDS` | `120` / `3600` | per IP+user; the nearby-search bucket |
+| `PARKING_SEARCH_DEFAULT_RADIUS_KM` | `5.0` | how far a search looks when it does not say |
+| `PARKING_SEARCH_MAX_RADIUS_KM` | `25.0` | ceiling on `radiusKm`, whatever the client asks for |
+| `PARKING_SEARCH_MAX_LIMIT` | `50` | ceiling on one page of results |
 | `AVATAR_MAX_BYTES` | `2097152` | 2 MB ceiling on the uploaded file, checked before decoding |
 | `AVATAR_MAX_DIMENSION` / `AVATAR_JPEG_QUALITY` | `512` / `82` | what every upload is re-encoded to |
 | `AVATAR_DIR` | `uploads/avatars` | where stored JPEGs live; relative to `Server/`, gitignored |
@@ -601,6 +707,10 @@ tests/
   test_profile.py         profile read/update, photo upload, avatar serving
   test_vehicles.py        vehicle CRUD, default switch, index guarantees
   test_facilities.py      facility CRUD, status transitions, scope matrix
+  test_spaces.py          floors, zones, spaces, the layout tree
+  test_parking.py         nearby search, filters, sorting, driver reads
+scripts/
+  seed_demo.py            demo facilities, layouts and accounts
 ```
 
 The auth, password-reset, profile, vehicle and facility tests need a MongoDB on
@@ -627,7 +737,10 @@ python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
 
 - **Collections** keep the DOC section 18 names: `parkingFacilities`, `parkingSessions`, ...
 - **Status values** are stored in the exact DOC section 17 spelling (`AVAILABLE`, `RESERVED`, ...).
-  The client's lowercase literals are mapped at the API boundary.
+  Vocabulary enums that name a thing rather than a state (`SpaceType`, `Amenity`,
+  `VehicleType`, `FuelType`) stay lowercase. There is no mapping layer: the
+  client mirrors both spellings, so a literal typed in the UI is the literal
+  stored in the document.
 - **Ids** are `ObjectId`s on the server and 24-character hex strings over the
   wire, **except** where a natural key is better: `revokedTokens._id` is the
   token `jti` and `passwordResetTokens._id` is the SHA-256 of the reset token.
@@ -670,5 +783,8 @@ python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
 | 18 | no profile photo anywhere in the DOC | `POST/DELETE /users/me/photo`, served from `/api/v1/avatars/{name}` | requested for this build; the file is always re-encoded, so `uploads/` holds only compressed JPEGs |
 | 10, 18 | `vehicles` lists `registrationNumber, type, model, fuelType, isEV` | same fields plus `isDefault`; **`isEV` is derived from `fuelType`** rather than sent by the client | keeping both writable would let them contradict each other, and the DOC never says when a hybrid counts as an EV - one derivation rule answers it everywhere |
 | 21 | no CRUD row for facilities (only `/api/parking` for discovery) | new `/api/v1/facilities` group for the management side | DOC section 7 asks operators to "create and manage parking facilities" and section 11.169 to close/reopen them, so the operations have to live somewhere; discovery stays in `parking` |
+| 18 | no base pricing on the facility | optional `hourlyRate` / `dailyMax` scalars | lets a driver page show a rate before the full `pricing` rules group exists; they become "the rule everything else overrides" when it lands |
+| 18 | no rating on the facility | optional `rating` / `reviewCount` scalars | lets a search row show a star before the `reviews` group exists; they become the cached aggregate it writes |
+| 21, 22 | `GET /api/parking/search` alongside `/nearby` | not implemented; the client resolves a free-text destination to coordinates and calls `/nearby` | one search path is one set of rules; a second text-search endpoint would need its own ranking, and the DOC's "nearby" contract is the one the client actually wants |
 | 18 | `hours` with no shape | `open24h` plus an optional `openingTime`/`closingTime` pair (`HH:MM`, UTC) | the smallest representation that still answers "open at a requested arrival time"; a weekly schedule arrives with the discovery phase |
 | 18 | no base pricing on the facility | optional `hourlyRate` / `dailyMax` scalars | lets a driver page show a rate before the full `pricing` rules group exists; they become "the rule everything else overrides" when it lands |

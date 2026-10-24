@@ -89,6 +89,20 @@ class Settings(BaseSettings):
     space_max_per_zone: int = 1000
     spaces_bulk_max: int = 500
 
+    # --- Parking discovery (DOC sections 7/19/20/22) ---
+    # Search is a read path, but it is also the most expensive one (a geospatial
+    # aggregation), so it gets a bucket of its own rather than sharing the
+    # write limits above.
+    parking_search_rate_limit: int = 120
+    parking_search_rate_window_seconds: int = 3600
+    # How far a driver looks when they do not say. The ceiling stops a single
+    # request from asking the database to scan a whole continent.
+    parking_search_default_radius_km: float = 5.0
+    parking_search_max_radius_km: float = 25.0
+    # Ceiling on one page of results, so `limit` cannot be used to pull the
+    # whole city in one round trip.
+    parking_search_max_limit: int = 50
+
     # --- Password reset ---
     password_reset_expires_minutes: int = 30
     password_reset_token_bytes: int = 32

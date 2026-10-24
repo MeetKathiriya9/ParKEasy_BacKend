@@ -264,6 +264,46 @@ async def space_counts(
     return result
 
 
+async def space_type_counts(
+    db: AsyncDatabase, facility_ids: list[Any]
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Map each facility id to its spaces broken down by type and status.
+
+    The shape is `facilityId -> spaceType -> {status: count}`. DOC section 22
+    asks a driver to filter by "parking type", and the useful question is not
+    "does this facility have EV bays" but "does it have an EV bay I can take
+    now" - so the status breakdown has to survive the grouping.
+
+    One aggregation covers every id, the same way `space_counts` does.
+    """
+    object_ids = [
+        object_id
+        for object_id in (to_object_id(str(value)) for value in facility_ids)
+        if object_id is not None
+    ]
+    if not object_ids:
+        return {}
+
+    pipeline = [
+        {"$match": {"facilityId": {"$in": object_ids}}},
+        {
+            "$group": {
+                "_id": {"facilityId": "$facilityId", "type": "$type", "status": "$status"},
+                "count": {"$sum": 1},
+            }
+        },
+    ]
+    result: dict[str, dict[str, dict[str, int]]] = {}
+    async for row in await db[SPACES_COLLECTION].aggregate(pipeline):
+        facility_key = str(row["_id"]["facilityId"])
+        by_type = result.setdefault(facility_key, {})
+        status_counts = by_type.setdefault(row["_id"].get("type") or "", {})
+        status_counts[row["_id"].get("status") or ""] = (
+            status_counts.get(row["_id"].get("status") or "", 0) + row["count"]
+        )
+    return result
+
+
 async def get_facility(
     db: AsyncDatabase,
     *,
@@ -332,6 +372,8 @@ async def create_facility(
         "amenities": [amenity.value for amenity in payload.amenities],
         "hourlyRate": payload.hourlyRate,
         "dailyMax": payload.dailyMax,
+        "rating": payload.rating,
+        "reviewCount": payload.reviewCount,
         "status": FacilityStatus.ACTIVE.value,
         "createdAt": now,
         "updatedAt": now,
@@ -377,7 +419,14 @@ async def update_facility(
         return document, False
 
     updates: dict[str, Any] = {}
-    for field_name in ("name", "address", "city", "description"):
+    for field_name in (
+        "name",
+        "address",
+        "city",
+        "description",
+        "rating",
+        "reviewCount",
+    ):
         if field_name in fields:
             updates[field_name] = getattr(payload, field_name)
     for field_name in ("openingTime", "closingTime", "hourlyRate", "dailyMax"):

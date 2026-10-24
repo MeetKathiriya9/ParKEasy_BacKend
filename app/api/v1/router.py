@@ -6,7 +6,16 @@ probes, authentication, and the remaining DOC section 21 stubs.
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, avatars, facilities, health, spaces, users, vehicles
+from app.api.v1 import (
+    auth,
+    avatars,
+    facilities,
+    health,
+    parking,
+    spaces,
+    users,
+    vehicles,
+)
 from app.api.v1.stubs import build_stub_routers
 
 api_router = APIRouter()
@@ -19,6 +28,8 @@ api_router.include_router(vehicles.router)
 api_router.include_router(facilities.router)
 # Floors/zones/spaces hang off `/facilities`, `/floors`, `/zones` and `/spaces`.
 api_router.include_router(spaces.router)
+# Driver-facing discovery: nearby search, details, availability, spaces.
+api_router.include_router(parking.router)
 # Avatar files are served from their own prefix so the URL is short and stable.
 api_router.include_router(avatars.router)
 
