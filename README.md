@@ -11,9 +11,10 @@ and WebSocket channel are in place, and the full route surface is documented.
 
 **Authentication is live** for all four roles from DOC section 12 - register,
 login, current-user and logout. **Profile, vehicles, facility management, the
-Facility -> Floor -> Zone -> Space layout and parking discovery are live** for
-the signed-in user. **Every other business endpoint still returns
-`501 Not Implemented`** until its phase lands.
+Facility -> Floor -> Zone -> Space layout, staff accounts with facility
+assignments, and parking discovery are live** for the signed-in user. **Every
+other business endpoint still returns `501 Not Implemented`** until its phase
+lands.
 
 | Area | State |
 | --- | --- |
@@ -24,6 +25,7 @@ the signed-in user. **Every other business endpoint still returns
 | `vehicles` - list / create / edit / delete / set default | done |
 | `facilities` - operator/admin CRUD plus the status transition | done |
 | `spaces` - floors / zones / spaces, the Facility -> Floor -> Zone -> Space tree | done |
+| `staff` - operator-owned staff accounts and facility assignments | done |
 | `parking` - nearby search, facility details, availability, driver spaces | done |
 | Remaining DOC section 21 groups (reservations, payments, reviews, ...) | `501` |
 
@@ -506,6 +508,91 @@ Invoke-RestMethod http://127.0.0.1:9999/api/v1/spaces/<spaceId>/status -Method P
   `SPACE_MAX_PER_ZONE`, `SPACES_BULK_MAX`) answer `409` rather than growing a
   layout without bound.
 
+### Staff accounts and assignments (DOC sections 7, 10, 11, 31)
+
+Eight endpoints under `/api/v1/staff` - the operator side of DOC section 10
+("manage staff") and section 11's staff workflow. This is how a staff account
+comes to exist and how it is given access to one or more garages. The staff
+portal itself (scanning, space status) is the `spaces` group.
+
+| Method | Path | Roles | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/staff` | operator, admin | list staff; filters `facilityId`, `status`, `q` |
+| `POST` | `/staff` | operator, admin | create an account (`201`), optional initial facilities |
+| `GET` | `/staff/{id}` | operator, admin | one member with the full assignment history |
+| `PATCH` | `/staff/{id}` | operator, admin | edit name / phone; admin may adopt an unowned account |
+| `PATCH` | `/staff/{id}/status` | operator, admin | suspend or reactivate |
+| `GET` | `/staff/{id}/assignments` | operator, admin | history, newest first |
+| `POST` | `/staff/{id}/assignments` | operator, admin | assign a facility (`201`) |
+| `DELETE` | `/staff/{id}/assignments/{assignmentId}` | operator, admin | end an assignment (`200`) |
+
+```powershell
+$h = @{ Authorization = "Bearer $token" }
+
+# Create and assign in one step. The operator owns the account; the password
+# is set here (there is no invite email).
+$staff = Invoke-RestMethod http://127.0.0.1:9999/api/v1/staff -Method Post -Headers $h `
+  -ContentType 'application/json' -Body (@{
+    name = "Ravi Shah"; email = "ravi@example.com"; phone = "+919876543210"
+    password = "parkeasy123"; facilityIds = @($facilityId)
+  } | ConvertTo-Json)
+
+# Move them: end the old period, open a new one. Both rows stay in the history.
+$active = (Invoke-RestMethod "http://127.0.0.1:9999/api/v1/staff/$($staff.id)/assignments?status=ACTIVE" -Headers $h)[0]
+Invoke-RestMethod "http://127.0.0.1:9999/api/v1/staff/$($staff.id)/assignments/$($active.id)?reason=Moved%20branches" -Method Delete -Headers $h
+Invoke-RestMethod "http://127.0.0.1:9999/api/v1/staff/$($staff.id)/assignments" -Method Post -Headers $h `
+  -ContentType 'application/json' -Body (@{ facilityId = $otherFacilityId } | ConvertTo-Json)
+
+# Off-boarding is a status change, not a delete.
+Invoke-RestMethod "http://127.0.0.1:9999/api/v1/staff/$($staff.id)/status" -Method Patch -Headers $h `
+  -ContentType 'application/json' -Body '{"status":"SUSPENDED","reason":"Left the company"}'
+```
+
+**How it works**
+
+- **Staff belong to an operator.** `operatorId` is taken from the signed-in
+  operator; an admin must send it to create a member on an operator's behalf
+  (an operator sending it gets a `422`). An admin may also *adopt* a staff
+  account that has no owner yet, but ownership never moves once set, and
+  adoption is refused while the member has active assignments belonging to
+  another operator.
+- **The operator sets the first password** (same 8-72 character, letter+digit
+  rule as registration). There is no invite email; the member can change it
+  through the normal password flow. Passwords and hashes never appear in a
+  response or an audit row.
+- **Assignments are periods, not a single field.** `POST` opens an `ACTIVE`
+  row; `DELETE` closes it as `INACTIVE` with who/when/why; re-assigning starts
+  a new row, so a move there-and-back leaves three rows rather than collapsing
+  into one. A partial unique index on `(staffId, facilityId)` where
+  `status=ACTIVE` is the real duplicate guard, so two simultaneous assignments
+  cannot both succeed (`409 ASSIGNMENT_EXISTS`).
+- **The rows are the source of truth; `users.facilityIds` is a cache.** Every
+  assignment change recomputes the field from the active rows. That is what
+  makes access follow the data: `get_current_user` reads the stored
+  `facilityIds` and `status` instead of trusting the token, so unassigning a
+  member revokes their next request, and suspending returns `401
+  ACCOUNT_SUSPENDED` even with an unexpired token. There are no transactions
+  here (standalone MongoDB), so recomputing - rather than `$addToSet`/`$pull` -
+  also makes the cache self-healing if one update is ever lost.
+- **Suspension keeps assignments dormant.** Access is revoked immediately, but
+  the rows and `facilityIds` stay; reactivating restores exactly the garages
+  the member covered before, with no re-assignment work.
+- **Operators can only touch their own.** A foreign, unknown or malformed staff
+  id is a `404` with the same message, never a `403` that would confirm the id
+  exists. Assigning a facility the operator does not own is the same `404`;
+  assigning a suspended member is `409 STAFF_NOT_ACTIVE`.
+- **There is no hard delete.** Off-boarding is `SUSPENDED`; the audit trail and
+  assignment history stay intact.
+- **A facility with active staff cannot be deleted** (`409 FACILITY_IN_USE`);
+  unassign first, or set the facility `INACTIVE`. Deleting a facility cascades
+  its closed assignment rows along with its floors, zones and spaces.
+- **Audited** as `STAFF_CREATED`, `STAFF_UPDATED`, `STAFF_STATUS_CHANGED`
+  (`{from, to, reason}`), `STAFF_ASSIGNED` and `STAFF_UNASSIGNED` - field names
+  and ids only.
+- **Writes are rate limited** per user (`STAFF_WRITE_RATE_LIMIT`), and a
+  ceiling of `STAFF_MAX_PER_OPERATOR` accounts answers `409
+  STAFF_LIMIT_REACHED`.
+
 ### Parking discovery (DOC sections 7, 19, 20, 21, 22)
 
 Four endpoints under `/api/v1/parking` - the driver-facing window onto
@@ -617,8 +704,11 @@ Password for both demo accounts is `parkeasy123`.
   password both return the same `INVALID_CREDENTIALS` 401, and a miss still
   runs a dummy bcrypt comparison so response timing does not reveal which
   addresses are registered (DOC section 31, user enumeration).
-- **Suspended and pending** accounts are refused with `403` and a distinct
-  `ACCOUNT_SUSPENDED` / `ACCOUNT_PENDING` code.
+- **Suspended and pending** accounts cannot log in: both answer `403` with a
+  distinct `ACCOUNT_SUSPENDED` / `ACCOUNT_PENDING` code. The check does not rely
+  on the token alone - `get_current_user` reads the stored `status`, so an
+  account suspended mid-session is refused on its *next* request with a `401`
+  carrying the same code, and the client signs it out.
 
 ### Configuration
 
@@ -638,6 +728,8 @@ Password for both demo accounts is `parkeasy123`.
 | `VEHICLE_MAX_PER_USER` | `20` | vehicles per account; the ceiling answers `409` |
 | `FACILITY_WRITE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `60` / `3600` | per operator; create / edit / delete / status |
 | `FACILITY_MAX_PER_OPERATOR` | `50` | facilities per operator; the ceiling answers `409` |
+| `STAFF_WRITE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `60` / `3600` | per user; create / edit / status / assign / unassign |
+| `STAFF_MAX_PER_OPERATOR` | `100` | staff accounts per operator; the ceiling answers `409` |
 | `SPACE_WRITE_RATE_LIMIT` / `..._WINDOW_SECONDS` | `120` / `3600` | per operator; floors / zones / spaces writes |
 | `FLOOR_MAX_PER_FACILITY` | `50` | floors per facility; the ceiling answers `409` |
 | `ZONE_MAX_PER_FLOOR` | `100` | zones per floor; the ceiling answers `409` |
@@ -708,14 +800,16 @@ tests/
   test_vehicles.py        vehicle CRUD, default switch, index guarantees
   test_facilities.py      facility CRUD, status transitions, scope matrix
   test_spaces.py          floors, zones, spaces, the layout tree
+  test_staff.py           staff accounts, assignments, live access revocation
   test_parking.py         nearby search, filters, sorting, driver reads
 scripts/
   seed_demo.py            demo facilities, layouts and accounts
 ```
 
-The auth, password-reset, profile, vehicle and facility tests need a MongoDB on
-`MONGODB_URI`; they use a throwaway `parkeasy_test` database that is dropped on
-teardown, and skip the database-dependent cases when none is reachable. The
+The auth, password-reset, profile, vehicle, facility, space and staff tests need
+a MongoDB on `MONGODB_URI`; they use a throwaway `parkeasy_test` database that
+is dropped on teardown, and skip the database-dependent cases when none is
+reachable. The
 profile tests also redirect `AVATAR_DIR` into a temporary directory, so a run
 never writes into the repository's `uploads/`. The rest of the suite runs fully
 offline.
@@ -783,6 +877,7 @@ python -m pytest -k "not test_password_reset"   # skip the ones needing Mongo
 | 18 | no profile photo anywhere in the DOC | `POST/DELETE /users/me/photo`, served from `/api/v1/avatars/{name}` | requested for this build; the file is always re-encoded, so `uploads/` holds only compressed JPEGs |
 | 10, 18 | `vehicles` lists `registrationNumber, type, model, fuelType, isEV` | same fields plus `isDefault`; **`isEV` is derived from `fuelType`** rather than sent by the client | keeping both writable would let them contradict each other, and the DOC never says when a hybrid counts as an EV - one derivation rule answers it everywhere |
 | 21 | no CRUD row for facilities (only `/api/parking` for discovery) | new `/api/v1/facilities` group for the management side | DOC section 7 asks operators to "create and manage parking facilities" and section 11.169 to close/reopen them, so the operations have to live somewhere; discovery stays in `parking` |
+| 21 | no `staff` group in the example API structure | new `/api/v1/staff` group for accounts and facility assignments | DOC sections 7, 10 and 11 require operators to create staff and assign them to facilities, and section 11 asks for the assignment history; the portal's read/write of spaces stays in `spaces` |
 | 18 | no base pricing on the facility | optional `hourlyRate` / `dailyMax` scalars | lets a driver page show a rate before the full `pricing` rules group exists; they become "the rule everything else overrides" when it lands |
 | 18 | no rating on the facility | optional `rating` / `reviewCount` scalars | lets a search row show a star before the `reviews` group exists; they become the cached aggregate it writes |
 | 21, 22 | `GET /api/parking/search` alongside `/nearby` | not implemented; the client resolves a free-text destination to coordinates and calls `/nearby` | one search path is one set of rules; a second text-search endpoint would need its own ranking, and the DOC's "nearby" contract is the one the client actually wants |

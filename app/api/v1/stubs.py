@@ -117,6 +117,25 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
         implemented=True,
     ),
     RouteGroupSpec(
+        "staff",
+        "Staff accounts and facility assignments (operator/admin)",
+        (
+            "GET /",
+            "POST /",
+            "GET /{id}",
+            "PATCH /{id}",
+            "PATCH /{id}/status",
+            "GET /{id}/assignments",
+            "POST /{id}/assignments",
+            "DELETE /{id}/assignments/{assignmentId}",
+        ),
+        # DOC section 21 has no staff group, but DOC sections 7, 10 and 11
+        # require operators to create staff and assign them to facilities, so
+        # this is a documented deviation (see the server README). The routes
+        # live in app/api/v1/staff.py.
+        implemented=True,
+    ),
+    RouteGroupSpec(
         "reservations",
         "Reservation lifecycle",
         (
@@ -127,11 +146,19 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
             "POST /{id}/check-in",
             "POST /{id}/check-out",
         ),
+        # Booking, lookup, cancellation and QR check-in/out live in
+        # app/api/v1/reservations.py. The engine is in
+        # app/services/reservations.py.
+        implemented=True,
     ),
     RouteGroupSpec(
         "sessions",
         "Active parking sessions",
         ("GET /active", "PATCH /{id}/extend", "POST /{id}/close"),
+        # Listing/reading/closing live in app/api/v1/sessions.py. Extension is
+        # still a 501 on its individual route because it needs pricing and slot
+        # re-claiming from later modules.
+        implemented=True,
     ),
     RouteGroupSpec(
         "payments",

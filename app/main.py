@@ -11,9 +11,10 @@ or via run.py. The factory `create_app()` is what Uvicorn should target:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,7 @@ from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.db.client import close_mongo_connection, connect_to_mongo
 from app.db.indexes import ensure_indexes
+from app.services.reservations import sweep_reservations
 from app.sockets.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,7 @@ TAGS_METADATA = [
     {"name": "facilities", "description": "Parking facility management (operator/admin)."},
     {"name": "parking", "description": "Nearby search, facility details, availability."},
     {"name": "spaces", "description": "Individual spaces, zones and status."},
+    {"name": "staff", "description": "Staff accounts and facility assignments (operator/admin)."},
     {"name": "reservations", "description": "Booking lifecycle and QR entry/exit."},
     {"name": "sessions", "description": "Active parking sessions, extend and close."},
     {"name": "payments", "description": "Billing, receipts and refunds."},
@@ -85,6 +88,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         app.state.db = await connect_to_mongo(settings)
         await ensure_indexes(app.state.db)
+        app.state.sweeper = asyncio.create_task(
+            _reservation_sweeper(app.state.db, settings)
+        )
     except Exception:
         # Stay up even without a database so /health still reports liveness and
         # /health/db reports the degraded state; routes needing Mongo will 503.
@@ -93,8 +99,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        sweeper = getattr(app.state, "sweeper", None)
+        if sweeper is not None:
+            sweeper.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper
         await close_mongo_connection()
         logger.info("Shutdown complete")
+
+
+async def _reservation_sweeper(db: object, settings: Settings) -> None:
+    """Expire past bookings and release no-shows in the background.
+
+    The same sweep also runs lazily on the reservation read/check-in paths, so
+    the API is correct even when this task is not running (tests create the app
+    without a lifespan). The task exists so an idle system still releases slots
+    without waiting for a request.
+    """
+    while True:
+        try:
+            await sweep_reservations(db, settings=settings)  # type: ignore[arg-type]
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Reservation sweep failed")
+        await asyncio.sleep(settings.reservation_sweep_seconds)
 
 
 def _ensure_upload_directories(settings: Settings) -> None:

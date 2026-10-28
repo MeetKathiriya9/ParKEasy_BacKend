@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     # multi-facility operator (DOC section 8) cannot grow without bound.
     facility_max_per_operator: int = 50
 
+    # --- Staff management (DOC sections 7/10/11) ---
+    staff_write_rate_limit: int = 60
+    staff_write_rate_window_seconds: int = 3600
+    # Ceiling on how many staff accounts one operator may own, so the group
+    # cannot be used to grow an operator's documents without bound.
+    staff_max_per_operator: int = 100
+
     # --- Floors, zones and spaces (DOC sections 7/11/18) ---
     space_write_rate_limit: int = 120
     space_write_rate_window_seconds: int = 3600
@@ -102,6 +109,30 @@ class Settings(BaseSettings):
     # Ceiling on one page of results, so `limit` cannot be used to pull the
     # whole city in one round trip.
     parking_search_max_limit: int = 50
+
+    # --- Reservations and parking sessions (DOC sections 16/17/21) ---
+    # A driver picks a 30-minute-aligned window; the booking engine claims one
+    # slot row per step. The bounds stop a single request from holding a space
+    # for a week or from asking for a zero-length stay.
+    reservation_write_rate_limit: int = 60
+    reservation_write_rate_window_seconds: int = 3600
+    reservation_slot_minutes: int = 30
+    reservation_min_minutes: int = 30
+    reservation_max_minutes: int = 24 * 60
+    # A booking may not start further out than this, so the slot table cannot
+    # be filled years in advance.
+    reservation_max_advance_days: int = 30
+    # How early before the start a driver may check in. Staff can always check
+    # in a late arrival until the booking's end.
+    reservation_checkin_early_minutes: int = 30
+    # A confirmed booking that is still unclaimed this long after its start is
+    # marked NO_SHOW and its slots are released.
+    reservation_no_show_grace_minutes: int = 30
+    # How often the background sweep runs. The same sweep also runs lazily on
+    # the list/check-in paths so tests (which have no lifespan task) see it.
+    reservation_sweep_seconds: int = 60
+    session_write_rate_limit: int = 120
+    session_write_rate_window_seconds: int = 3600
 
     # --- Password reset ---
     password_reset_expires_minutes: int = 30

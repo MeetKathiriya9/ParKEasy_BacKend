@@ -114,6 +114,8 @@ class UserResponse(BaseModel):
     status: UserStatus
     photoUrl: str | None = None
     facilityIds: list[str] = Field(default_factory=list)
+    # Only meaningful for `staff`: the operator account that owns the member.
+    operatorId: str | None = None
     # Typed as datetime so OpenAPI documents the format; Pydantic serialises
     # UTC values with a trailing "Z", which is what the client expects.
     createdAt: datetime | None = None

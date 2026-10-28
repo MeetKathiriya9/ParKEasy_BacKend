@@ -308,9 +308,9 @@ async def change_facility_status(
     summary="Delete a facility",
     description=(
         "Hard delete, refused with `409` and code `FACILITY_IN_USE` while any "
-        "reservation or parking session still points at the facility - retiring "
-        "a busy garage is a status change, not a delete. An unknown id answers "
-        "`404`."
+        "reservation, parking session or active staff assignment still points at "
+        "the facility - retiring a busy garage is a status change, not a delete. "
+        "An unknown id answers `404`."
     ),
     responses=_FACILITIES_ERROR_RESPONSES,
 )

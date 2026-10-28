@@ -47,9 +47,14 @@ class CurrentUser:
 
     Identity fields (`name`, `email`, `phone`, `photo_url`) come from the user
     document read during authentication, so a profile edit is reflected on the
-    next request without a re-login. Authorization fields (`role`, `status`,
-    `facility_ids`) still come from the token, which is the documented
-    trade-off: those change on the next login rather than mid-session.
+    next request without a re-login.
+
+    Authorization fields (`status`, `facility_ids`, `operator_id`) also prefer
+    the stored document now. Staff assignments and account suspension are
+    changed by operators while the staff member may still hold a live token, so
+    reading those from the token would leave a deactivated assignment working
+    until expiry - the opposite of what "deactivate" means. The token claims
+    remain a fallback for a legacy row that predates a field.
     """
 
     id: str
@@ -60,6 +65,7 @@ class CurrentUser:
     photo_url: str | None = None
     status: UserStatus = UserStatus.ACTIVE
     facility_ids: frozenset[str] = frozenset()
+    operator_id: str | None = None
 
     def has_facility_access(self, facility_id: str) -> bool:
         """Admins and operators reach everything; staff are scoped to assignments."""
@@ -122,7 +128,16 @@ async def get_current_user(
         _is_revoked(),
         db[USERS_COLLECTION].find_one(
             {"_id": to_object_id(subject)},
-            {"passwordChangedAt": 1, "name": 1, "email": 1, "phone": 1, "photoUrl": 1},
+            {
+                "passwordChangedAt": 1,
+                "name": 1,
+                "email": 1,
+                "phone": 1,
+                "photoUrl": 1,
+                "status": 1,
+                "facilityIds": 1,
+                "operatorId": 1,
+            },
         ),
     )
 
@@ -158,13 +173,37 @@ async def get_current_user(
                     "Your password was changed. Please sign in again on this device."
                 )
 
-    raw_status = payload.get("status") or UserStatus.ACTIVE
+    # Status is read from the stored row when it is present: an operator can
+    # suspend a staff member mid-session, and the live token must stop working
+    # immediately. The claim is only a fallback for documents that predate the
+    # field (or tokens minted against a partial test fixture).
+    raw_status = account.get("status") or payload.get("status") or UserStatus.ACTIVE
     try:
         status = UserStatus(raw_status)
     except ValueError:
         status = UserStatus.ACTIVE
 
-    facility_ids = payload.get("facilityIds") or []
+    if status is UserStatus.SUSPENDED:
+        raise UnauthorizedError(
+            "This account has been suspended. Contact an administrator.",
+            code="ACCOUNT_SUSPENDED",
+        )
+    if status is UserStatus.PENDING:
+        raise UnauthorizedError(
+            "This account is awaiting administrator approval.",
+            code="ACCOUNT_PENDING",
+        )
+
+    # Assignments are the same story: `PATCH /staff/{id}/assignments` changes
+    # this list while the staff member is signed in, so the stored value wins.
+    # A row that has no `facilityIds` key at all is legacy - fall back to the
+    # claim so old tokens keep the access they were issued with.
+    if "facilityIds" in account:
+        facility_ids = account.get("facilityIds") or []
+    else:
+        facility_ids = payload.get("facilityIds") or []
+
+    operator_id = account.get("operatorId")
 
     # Kept on the request so WebSocket endpoints can read the same principal.
     request.scope["user"] = subject
@@ -180,6 +219,7 @@ async def get_current_user(
         photo_url=account.get("photoUrl"),
         status=status,
         facility_ids=frozenset(facility_ids),
+        operator_id=str(operator_id) if operator_id else None,
     )
 
 

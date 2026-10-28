@@ -58,6 +58,18 @@ class SpaceType(StrEnum):
     ACCESSIBLE = "accessible"
 
 
+class AssignmentStatus(StrEnum):
+    """Staff-to-facility assignment state.
+
+    A closed assignment is never deleted: it is the history row that answers
+    "who was allowed here last month". Re-assigning the same pair creates a new
+    row rather than reopening the old one, so each period stands on its own.
+    """
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
 class ZoneStatus(StrEnum):
     """A zone's open/closed state (DOC section 11.169 "close or reopen
     facility/zone"). Closing a zone blocks its spaces without deleting them."""

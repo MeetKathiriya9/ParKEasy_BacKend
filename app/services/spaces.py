@@ -65,6 +65,7 @@ class SpaceErrorCode:
     ZONE_LIMIT_REACHED = "ZONE_LIMIT_REACHED"
     SPACE_LIMIT_REACHED = "SPACE_LIMIT_REACHED"
     SPACE_DUPLICATE = "SPACE_DUPLICATE"
+    SPACE_IN_USE = "SPACE_IN_USE"
 
 
 # --- Scope helpers (each loads the parent chain, then defers to facilities) ---
@@ -771,6 +772,12 @@ async def set_space_status(
     previous = space.get("status", SpaceStatus.AVAILABLE.value)
     if previous == payload.status.value:
         return space, previous
+    if previous in (SpaceStatus.OCCUPIED.value, SpaceStatus.RESERVED.value):
+        raise ConflictError(
+            "This space is in use. Close the parking session first.",
+            code=SpaceErrorCode.SPACE_IN_USE,
+            details={"status": previous},
+        )
 
     updated = await db[SPACES_COLLECTION].find_one_and_update(
         {"_id": space["_id"]},

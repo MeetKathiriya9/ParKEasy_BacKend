@@ -166,9 +166,9 @@ async def read_current_user(user: CurrentUserDep) -> UserResponse:
 
     Identity fields come from the user document that `get_current_user` already
     reads to check `passwordChangedAt`, so the photo and phone survive a page
-    refresh without an extra query. Authorization fields (`role`, `status`,
-    `facilityIds`) are still taken from the token, so a change to those lands on
-    the next login.
+    refresh without an extra query. `status` and `facilityIds` also come from
+    the document, which is what makes a suspension or a removed staff
+    assignment take effect on the next request instead of at the next login.
     """
     return UserResponse(
         id=user.id,
@@ -179,6 +179,7 @@ async def read_current_user(user: CurrentUserDep) -> UserResponse:
         role=user.role,
         status=user.status,
         facilityIds=sorted(user.facility_ids),
+        operatorId=user.operator_id,
     )
 
 

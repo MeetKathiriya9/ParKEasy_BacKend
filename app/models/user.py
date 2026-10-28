@@ -46,6 +46,14 @@ class UserDocument(TypedDict):
     updatedAt: datetime
     lastLoginAt: NotRequired[datetime]
     createdBy: NotRequired[ObjectId]
+    operatorId: NotRequired[ObjectId | None]
+    """The operator account that owns this staff member.
+
+    Only meaningful for `role == "staff"`. Set when an operator creates the
+    account, or when an admin provisions one on an operator's behalf. Absent on
+    staff accounts that self-registered (or were created before this field),
+    which an admin can adopt with `PATCH /staff/{id}`.
+    """
     photoUrl: NotRequired[str | None]
     """URL of the compressed avatar JPEG, `/api/v1/avatars/<file>`.
 
@@ -123,6 +131,9 @@ def public_user(document: dict[str, Any]) -> dict[str, Any]:
         "status": document.get("status"),
         "photoUrl": document.get("photoUrl"),
         "facilityIds": list(document.get("facilityIds") or []),
+        "operatorId": (
+            str(document["operatorId"]) if document.get("operatorId") else None
+        ),
         "createdAt": document.get("createdAt"),
         "updatedAt": document.get("updatedAt"),
         "lastLoginAt": document.get("lastLoginAt"),

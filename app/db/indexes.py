@@ -20,6 +20,9 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
         IndexModel([("email", ASCENDING)], unique=True, name="uniq_email"),
         IndexModel([("role", ASCENDING)], name="role_1"),
         IndexModel([("status", ASCENDING)], name="status_1"),
+        # Staff listings are scoped by owning operator; the role is part of the
+        # key because the same owner also has non-staff rows to skip.
+        IndexModel([("operatorId", ASCENDING), ("role", ASCENDING)], name="operator_role_1"),
     ],
     "vehicles": [
         IndexModel([("userId", ASCENDING)], name="userId_1"),
@@ -78,6 +81,20 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
         IndexModel([("facilityId", ASCENDING), ("floorId", ASCENDING)], name="facility_floor_1"),
         IndexModel([("facilityId", ASCENDING), ("zoneId", ASCENDING)], name="facility_zone_1"),
     ],
+    "staffAssignments": [
+        # The database, not just the service, is what makes "one active
+        # assignment per staff/facility pair" true. Closed history rows are
+        # outside the partial index, so the pair can be assigned again later.
+        IndexModel(
+            [("staffId", ASCENDING), ("facilityId", ASCENDING)],
+            unique=True,
+            name="uniq_active_assignment",
+            partialFilterExpression={"status": "ACTIVE"},
+        ),
+        IndexModel([("facilityId", ASCENDING), ("status", ASCENDING)], name="facility_status_1"),
+        IndexModel([("staffId", ASCENDING), ("assignedAt", DESCENDING)], name="staff_assigned_1"),
+        IndexModel([("operatorId", ASCENDING), ("status", ASCENDING)], name="operator_status_1"),
+    ],
     "reservations": [
         IndexModel(
             [("userId", ASCENDING), ("startTime", DESCENDING)],
@@ -87,13 +104,42 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
             [("facilityId", ASCENDING), ("status", ASCENDING)],
             name="facility_status_1",
         ),
+        IndexModel([("reference", ASCENDING)], unique=True, name="uniq_reference"),
         IndexModel([("qrToken", ASCENDING)], unique=True, sparse=True, name="uniq_qr"),
         IndexModel([("endTime", ASCENDING), ("status", ASCENDING)], name="expiry_sweep_1"),
+        IndexModel(
+            [("operatorId", ASCENDING), ("startTime", ASCENDING)],
+            name="operator_start_1",
+        ),
+        IndexModel(
+            [("facilityId", ASCENDING), ("startTime", ASCENDING)],
+            name="facility_start_1",
+        ),
+    ],
+    # One row per claimed 30-minute slot. The unique key is the overlap guard:
+    # two reservations cannot own the same (space, slot) pair, so overlapping
+    # bookings for one space are rejected by the database itself.
+    "reservationSlots": [
+        IndexModel(
+            [("spaceId", ASCENDING), ("slotStart", ASCENDING)],
+            unique=True,
+            name="uniq_space_slot",
+        ),
+        IndexModel(
+            [("facilityId", ASCENDING), ("slotStart", ASCENDING)],
+            name="facility_slot_1",
+        ),
+        IndexModel([("reservationId", ASCENDING)], name="reservation_1"),
     ],
     "parkingSessions": [
         IndexModel([("reservationId", ASCENDING)], unique=True, sparse=True, name="uniq_res"),
         IndexModel([("facilityId", ASCENDING), ("status", ASCENDING)], name="facility_status_1"),
         IndexModel([("entryTime", DESCENDING)], name="entry_1"),
+        IndexModel(
+            [("operatorId", ASCENDING), ("entryTime", DESCENDING)],
+            name="operator_entry_1",
+        ),
+        IndexModel([("userId", ASCENDING), ("entryTime", DESCENDING)], name="user_entry_1"),
     ],
     "payments": [
         IndexModel([("reservationId", ASCENDING)], name="reservation_1"),

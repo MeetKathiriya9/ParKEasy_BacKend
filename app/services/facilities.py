@@ -10,17 +10,17 @@ vehicle group:
   own id - one account may hold many facilities (DOC section 8, "multi-facility
   operator support");
 * an **admin** sees and manages every facility (DOC section 12);
-* **staff** may *read* facilities assigned through `facilityIds` on the token,
-  which is what the scanner and space-status pages will need, but never write;
+* **staff** may *read* facilities assigned through `facilityIds`, which is what
+  the scanner and space-status pages will need, but never write;
 * a **driver** is not served here at all - discovery belongs to the `parking`
   group.
 
 A foreign or malformed facility id is a `404`, never a `403`: a `403` would
 confirm that the id exists, same rule the vehicle group follows.
 
-Deleting is refused with `409 FACILITY_IN_USE` while any reservation or session
-still points at the facility; retiring a busy garage is a status change to
-`INACTIVE` / `TEMPORARILY_CLOSED`, not a delete.
+Deleting is refused with `409 FACILITY_IN_USE` while any reservation, session or
+active staff assignment still points at the facility; retiring a busy garage is a
+status change to `INACTIVE` / `TEMPORARILY_CLOSED`, not a delete.
 """
 
 from __future__ import annotations
@@ -39,9 +39,10 @@ from app.core.errors import (
     ErrorCode,
     NotFoundError,
 )
-from app.models.enums import FacilityStatus, Role, SpaceStatus
+from app.models.enums import AssignmentStatus, FacilityStatus, Role, SpaceStatus
 from app.models.facility import FACILITIES_COLLECTION, geojson_point, hours_error
 from app.models.space import FLOORS_COLLECTION, SPACES_COLLECTION, ZONES_COLLECTION
+from app.models.staff import STAFF_ASSIGNMENTS_COLLECTION
 from app.schemas.facility import (
     ChangeFacilityStatusRequest,
     CreateFacilityRequest,
@@ -528,12 +529,34 @@ async def delete_facility(
             details={"reservations": reservations, "sessions": sessions},
         )
 
+    # Staff assignments are access, not history: an active row would keep
+    # granting a (now deleted) facility to its staff on their next request, so
+    # the delete is refused until the operator unassigns them. Closed rows are
+    # cascaded with the rest of the facility below.
+    active_assignments = await db[STAFF_ASSIGNMENTS_COLLECTION].count_documents(
+        {
+            "facilityId": facility_oid,
+            "status": AssignmentStatus.ACTIVE.value,
+        }
+    )
+    if active_assignments:
+        raise ConflictError(
+            "This facility still has staff assigned to it; unassign them first",
+            code=FacilityErrorCode.FACILITY_IN_USE,
+            details={"staffAssignments": active_assignments},
+        )
+
     result = await db[FACILITIES_COLLECTION].delete_one({"_id": facility_oid})
     if result.deleted_count == 0:
         raise NotFoundError(FACILITY_NOT_FOUND)
 
     # Cascade: everything below a facility is meaningless without it.
-    for collection in (SPACES_COLLECTION, ZONES_COLLECTION, FLOORS_COLLECTION):
+    for collection in (
+        SPACES_COLLECTION,
+        ZONES_COLLECTION,
+        FLOORS_COLLECTION,
+        STAFF_ASSIGNMENTS_COLLECTION,
+    ):
         await db[collection].delete_many(reference)
 
     logger.info("Deleted facility %s", facility_id)
