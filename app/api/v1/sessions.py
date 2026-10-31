@@ -1,16 +1,14 @@
-"""The `sessions` group: open parking sessions, close and (later) extend.
+"""The `sessions` group: open parking sessions, extend and close.
 
     GET    /active            the signed-in driver's open session, if any
     GET    /                  list sessions in the caller's scope
     GET    /{session_id}      one session
-    PATCH  /{session_id}/extend   planned; answers 501
+    PATCH  /{session_id}/extend   extend an active session
     POST   /{session_id}/close    close an active session
 
-A session is created by staff check-in (`POST /reservations/{id}/check-in`) and
-closed by staff check-out or by `POST /sessions/{id}/close` here. Drivers can
-read their own sessions; staff, operators and admins see the sessions in their
-facility scope. Extension is deliberately not implemented: it would need a
-pricing rule for the extra time and a slot re-claim, both later modules.
+A session is created by staff check-in (`POST /reservations/{id}/check-in`).
+Drivers can extend their own active session; staff can extend one in their
+facility scope. Closing is staff-only and produces the final price breakdown.
 """
 
 from __future__ import annotations
@@ -24,20 +22,19 @@ from pymongo.asynchronous.database import AsyncDatabase
 from app.api.deps import CurrentUser, require_roles
 from app.api.throttle import client_ip, throttle
 from app.core.config import Settings, get_settings
-from app.core.errors import NotImplementedYetError
 from app.core.rate_limit import RateLimit
 from app.db.client import get_database
 from app.models.enums import Role, SessionStatus
-from app.models.reservation import public_session
+from app.models.reservation import public_reservation, public_session
 from app.schemas.common import ErrorResponse, PaginatedResponse
-from app.schemas.session import SessionResponse
+from app.schemas.reservation import ExtendSessionResponse, ReservationResponse
+from app.schemas.session import ExtendSessionRequest, SessionResponse
 from app.services import audit
 from app.services import reservations as reservation_service
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 _ALL_ROLES = [Role.DRIVER, Role.STAFF, Role.OPERATOR, Role.ADMIN]
-_STAFF_ROLES = [Role.STAFF, Role.OPERATOR, Role.ADMIN]
 
 AUTHENTICATED_ERRORS: dict[int | str, dict[str, type[Any]]] = {
     401: {"model": ErrorResponse, "description": "Missing, invalid or revoked token"},
@@ -170,24 +167,49 @@ async def get_session(
 
 @router.patch(
     "/{session_id}/extend",
-    summary="Extend a parking session (not implemented)",
+    response_model=ExtendSessionResponse,
+    summary="Extend an active parking session",
     description=(
-        "**Not implemented yet.** Extending a session needs a pricing rule for "
-        "the extra time and a re-claim of the space's slots, both of which "
-        "belong to later modules."
+        "The driver who owns the session or staff in its facility scope may "
+        "extend it by a multiple of the 30-minute booking grid. The extra slots "
+        "are claimed atomically; a clash answers `409 SESSION_EXTENSION_CONFLICT`."
     ),
-    responses={
-        **_SESSION_ERROR_RESPONSES,
-        501: {"model": ErrorResponse, "description": "Not implemented yet"},
-    },
+    responses=_SESSION_ERROR_RESPONSES,
 )
 async def extend_session(
     session_id: str,
-    user: Annotated[CurrentUser, Depends(require_roles(*_STAFF_ROLES))],
-) -> None:
-    raise NotImplementedYetError(
-        "Session extension is planned but not implemented yet",
-        details={"group": "sessions", "sessionId": session_id},
+    payload: ExtendSessionRequest,
+    request: Request,
+    user: Annotated[CurrentUser, Depends(require_roles(*_ALL_ROLES))],
+    db: Annotated[AsyncDatabase, Depends(get_database)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ExtendSessionResponse:
+    _write_throttle(request, user, settings)
+    reservation, session = await reservation_service.extend_session(
+        db,
+        user_id=user.id,
+        role=user.role,
+        facility_ids=user.facility_ids,
+        session_id=session_id,
+        additional_minutes=payload.additionalMinutes,
+        settings=settings,
+    )
+    await audit.record(
+        db,
+        action="PARKING_SESSION_EXTENDED",
+        entity="parkingSession",
+        actor_id=user.id,
+        entity_id=session["_id"],
+        ip=client_ip(request),
+        metadata={
+            "reference": session.get("reference"),
+            "additionalMinutes": payload.additionalMinutes,
+            "scheduledEndTime": session.get("scheduledEndTime"),
+        },
+    )
+    return ExtendSessionResponse(
+        reservation=ReservationResponse.model_validate(public_reservation(reservation)),
+        session=_session(session),
     )
 
 
@@ -196,16 +218,16 @@ async def extend_session(
     response_model=SessionResponse,
     summary="Close an active parking session",
     description=(
-        "Staff only. Sets the exit time, computes the duration and base-rate "
-        "estimate, returns the space to `AVAILABLE`, releases the booking's "
-        "slots and marks the reservation `COMPLETED`."
+        "Staff only. Sets the exit time, computes the final price and breakdown, "
+        "returns the space to `AVAILABLE`, releases the booking's slots and "
+        "marks the reservation `COMPLETED`."
     ),
     responses=_SESSION_ERROR_RESPONSES,
 )
 async def close_session(
     session_id: str,
     request: Request,
-    user: Annotated[CurrentUser, Depends(require_roles(*_STAFF_ROLES))],
+    user: Annotated[CurrentUser, Depends(require_roles(Role.STAFF))],
     db: Annotated[AsyncDatabase, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> SessionResponse:

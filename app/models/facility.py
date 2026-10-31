@@ -50,6 +50,10 @@ MAX_CAPACITY = 10_000
 MIN_HOURLY_RATE = 0.0
 MAX_HOURLY_RATE = 10_000.0
 MAX_DAILY_MAX = 100_000.0
+DEFAULT_GRACE_MINUTES = 0
+DEFAULT_OVERSTAY_GRACE_MINUTES = 15
+MAX_GRACE_MINUTES = 120
+MAX_OVERSTAY_RATE = MAX_HOURLY_RATE
 # A five-point scale, rounded to one decimal by the schema.
 MIN_RATING = 0.0
 MAX_RATING = 5.0
@@ -138,6 +142,9 @@ class FacilityDocument(TypedDict):
     amenities: list[str]
     hourlyRate: float | None
     dailyMax: float | None
+    graceMinutes: int
+    overstayGraceMinutes: int
+    overstayRate: float | None
     rating: float | None
     reviewCount: int | None
     status: str
@@ -202,6 +209,11 @@ def public_facility(
         "isOpenNow": is_open_now(document),
         "hourlyRate": document.get("hourlyRate"),
         "dailyMax": document.get("dailyMax"),
+        "graceMinutes": int(document.get("graceMinutes", DEFAULT_GRACE_MINUTES)),
+        "overstayGraceMinutes": int(
+            document.get("overstayGraceMinutes", DEFAULT_OVERSTAY_GRACE_MINUTES)
+        ),
+        "overstayRate": document.get("overstayRate"),
         "rating": document.get("rating"),
         "reviewCount": document.get("reviewCount"),
         "status": document.get("status", FacilityStatus.ACTIVE.value),
@@ -211,13 +223,17 @@ def public_facility(
 
 
 __all__ = [
+    "DEFAULT_GRACE_MINUTES",
+    "DEFAULT_OVERSTAY_GRACE_MINUTES",
     "FACILITIES_COLLECTION",
     "MAX_ADDRESS_LENGTH",
     "MAX_CAPACITY",
     "MAX_CITY_LENGTH",
     "MAX_DESCRIPTION_LENGTH",
+    "MAX_GRACE_MINUTES",
     "MAX_HOURLY_RATE",
     "MAX_NAME_LENGTH",
+    "MAX_OVERSTAY_RATE",
     "MAX_RATING",
     "MAX_REVIEW_COUNT",
     "MIN_ADDRESS_LENGTH",

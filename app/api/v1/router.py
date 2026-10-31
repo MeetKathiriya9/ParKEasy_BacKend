@@ -12,6 +12,7 @@ from app.api.v1 import (
     facilities,
     health,
     parking,
+    pricing,
     reservations,
     sessions,
     spaces,
@@ -35,9 +36,10 @@ api_router.include_router(spaces.router)
 api_router.include_router(staff.router)
 # Driver-facing discovery: nearby search, details, availability, spaces.
 api_router.include_router(parking.router)
-# Booking engine and staff operations over it.
+# Booking engine, staff operations and the pricing engine.
 api_router.include_router(reservations.router)
 api_router.include_router(sessions.router)
+api_router.include_router(pricing.router)
 # Avatar files are served from their own prefix so the URL is short and stable.
 api_router.include_router(avatars.router)
 

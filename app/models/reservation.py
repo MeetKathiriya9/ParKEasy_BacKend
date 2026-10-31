@@ -63,6 +63,7 @@ class ReservationDocument(TypedDict):
     endTime: datetime
     status: str
     estimatedAmount: float | None
+    estimatedBreakdown: dict[str, Any] | None
     checkedInAt: datetime | None
     checkedOutAt: datetime | None
     cancelledAt: datetime | None
@@ -94,10 +95,14 @@ class SessionDocument(TypedDict):
     spaceNumber: str
     entryTime: datetime
     exitTime: datetime | None
+    scheduledEndTime: datetime
     status: str
     durationMinutes: int
     amount: float | None
     amountEstimated: bool
+    estimatedAmount: float | None
+    estimatedBreakdown: dict[str, Any] | None
+    pricingBreakdown: dict[str, Any] | None
     overstayMinutes: int
     closedById: ObjectId | None
     createdAt: datetime
@@ -174,6 +179,7 @@ def public_reservation(document: dict[str, Any]) -> dict[str, Any]:
         "durationMinutes": duration,
         "status": document.get("status", ReservationStatus.CONFIRMED.value),
         "estimatedAmount": document.get("estimatedAmount"),
+        "estimatedBreakdown": document.get("estimatedBreakdown"),
         "checkedInAt": as_utc(document.get("checkedInAt")),
         "checkedOutAt": as_utc(document.get("checkedOutAt")),
         "cancelledAt": as_utc(document.get("cancelledAt")),
@@ -200,10 +206,14 @@ def public_session(document: dict[str, Any]) -> dict[str, Any]:
         "spaceNumber": document.get("spaceNumber"),
         "entryTime": as_utc(document.get("entryTime")),
         "exitTime": as_utc(document.get("exitTime")),
+        "scheduledEndTime": as_utc(document.get("scheduledEndTime")),
         "status": document.get("status", SessionStatus.ACTIVE.value),
         "durationMinutes": int(document.get("durationMinutes") or 0),
         "amount": document.get("amount"),
         "amountEstimated": bool(document.get("amountEstimated", True)),
+        "estimatedAmount": document.get("estimatedAmount"),
+        "estimatedBreakdown": document.get("estimatedBreakdown"),
+        "pricingBreakdown": document.get("pricingBreakdown"),
         "overstayMinutes": int(document.get("overstayMinutes") or 0),
         "closedById": _id_or_none(document.get("closedById")),
         "createdAt": as_utc(document.get("createdAt")),

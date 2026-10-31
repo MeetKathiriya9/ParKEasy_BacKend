@@ -32,12 +32,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.models.enums import Amenity, FacilityStatus
 from app.models.facility import (
+    DEFAULT_GRACE_MINUTES,
+    DEFAULT_OVERSTAY_GRACE_MINUTES,
     MAX_ADDRESS_LENGTH,
     MAX_CITY_LENGTH,
     MAX_DAILY_MAX,
     MAX_DESCRIPTION_LENGTH,
+    MAX_GRACE_MINUTES,
     MAX_HOURLY_RATE,
     MAX_NAME_LENGTH,
+    MAX_OVERSTAY_RATE,
     MAX_RATING,
     MAX_REVIEW_COUNT,
     MIN_ADDRESS_LENGTH,
@@ -78,6 +82,11 @@ class CreateFacilityRequest(BaseModel):
     description: str | None = None
     hourlyRate: float | None = Field(default=None, gt=0.0, le=MAX_HOURLY_RATE)
     dailyMax: float | None = Field(default=None, gt=0.0, le=MAX_DAILY_MAX)
+    graceMinutes: int = Field(default=DEFAULT_GRACE_MINUTES, ge=0, le=MAX_GRACE_MINUTES)
+    overstayGraceMinutes: int = Field(
+        default=DEFAULT_OVERSTAY_GRACE_MINUTES, ge=0, le=MAX_GRACE_MINUTES
+    )
+    overstayRate: float | None = Field(default=None, gt=0.0, le=MAX_OVERSTAY_RATE)
     # The facility's standing on the five-point scale. Written by the operator
     # for now; the reviews group will own it once DOC section 21's `/api/reviews`
     # lands, and until then it is simply the number the driver page shows.
@@ -186,6 +195,9 @@ class UpdateFacilityRequest(BaseModel):
     amenities: list[Amenity] | None = None
     hourlyRate: float | None = None
     dailyMax: float | None = None
+    graceMinutes: int | None = None
+    overstayGraceMinutes: int | None = None
+    overstayRate: float | None = None
     rating: float | None = None
     reviewCount: int | None = None
     # Declared only so the 422s below can name the endpoints that do handle
@@ -269,6 +281,24 @@ class UpdateFacilityRequest(BaseModel):
             raise ValueError(f"dailyMax must be greater than 0 and at most {MAX_DAILY_MAX}")
         return value
 
+    @field_validator("graceMinutes", "overstayGraceMinutes")
+    @classmethod
+    def _grace_minutes(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if not 0 <= value <= MAX_GRACE_MINUTES:
+            raise ValueError(f"grace minutes must be between 0 and {MAX_GRACE_MINUTES}")
+        return value
+
+    @field_validator("overstayRate")
+    @classmethod
+    def _overstay_rate(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if not 0.0 < value <= MAX_OVERSTAY_RATE:
+            raise ValueError(f"overstayRate must be greater than 0 and at most {MAX_OVERSTAY_RATE}")
+        return value
+
     @field_validator("openingTime", "closingTime")
     @classmethod
     def _time(cls, value: str | None) -> str | None:
@@ -322,7 +352,16 @@ class UpdateFacilityRequest(BaseModel):
                 "capacity is derived from the facility's spaces and cannot be set"
             )
 
-        for field_name in ("name", "address", "lat", "lng", "open24h", "amenities"):
+        for field_name in (
+            "name",
+            "address",
+            "lat",
+            "lng",
+            "open24h",
+            "amenities",
+            "graceMinutes",
+            "overstayGraceMinutes",
+        ):
             if field_name in fields and getattr(self, field_name) is None:
                 raise ValueError(f"{field_name} cannot be null")
 
@@ -380,6 +419,9 @@ class FacilityResponse(BaseModel):
     isOpenNow: bool
     hourlyRate: float | None = None
     dailyMax: float | None = None
+    graceMinutes: int = DEFAULT_GRACE_MINUTES
+    overstayGraceMinutes: int = DEFAULT_OVERSTAY_GRACE_MINUTES
+    overstayRate: float | None = None
     rating: float | None = None
     reviewCount: int | None = None
     status: FacilityStatus

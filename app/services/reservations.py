@@ -63,6 +63,7 @@ from app.models.reservation import (
 from app.models.space import SPACES_COLLECTION, ZONES_COLLECTION
 from app.models.vehicle import VEHICLES_COLLECTION
 from app.schemas.reservation import CreateReservationRequest
+from app.services import pricing
 from app.services.facilities import visible_facility
 from app.utils.mongo import to_object_id, utcnow
 
@@ -89,6 +90,8 @@ class ReservationErrorCode:
     RESERVATION_NOT_ACTIVE = "RESERVATION_NOT_ACTIVE"
     SESSION_NOT_ACTIVE = "SESSION_NOT_ACTIVE"
     SESSION_ALREADY_CLOSED = "SESSION_ALREADY_CLOSED"
+    SESSION_EXTENSION_TOO_LONG = "SESSION_EXTENSION_TOO_LONG"
+    SESSION_EXTENSION_CONFLICT = "SESSION_EXTENSION_CONFLICT"
 
 
 # --- Small helpers -----------------------------------------------------------
@@ -212,23 +215,6 @@ def _validate_interval(
                 status_code=422,
             )
     return minutes
-
-
-def _estimate_amount(facility: dict[str, Any], minutes: int) -> float | None:
-    """Base-rate estimate; `None` when the facility has not published a rate.
-
-    The daily cap is applied because a long stay should not exceed the posted
-    day rate. This is explicitly *not* a payment: pricing rules and payments are
-    later modules, and the response says `amountEstimated: true`.
-    """
-    hourly = facility.get("hourlyRate")
-    if hourly is None:
-        return None
-    amount = float(hourly) * (minutes / 60)
-    daily_max = facility.get("dailyMax")
-    if daily_max is not None:
-        amount = min(amount, float(daily_max))
-    return round(amount, 2)
 
 
 async def _facility(db: AsyncDatabase, facility_id: str | ObjectId) -> dict[str, Any]:
@@ -478,7 +464,7 @@ async def create_reservation(
     now = utcnow()
     start = _stored_utc(payload.startTime) or payload.startTime
     end = _stored_utc(payload.endTime) or payload.endTime
-    minutes = _validate_interval(start, end, settings=settings, now=now)
+    _validate_interval(start, end, settings=settings, now=now)
 
     facility = await _active_facility(db, payload.facilityId)
     vehicle = await _owned_vehicle(db, user_id=user_id, vehicle_id=payload.vehicleId)
@@ -545,6 +531,14 @@ async def create_reservation(
             code=code,
         )
 
+    rules = await pricing.active_rules(db, facility_oid)
+    estimate = pricing.reservation_estimate(
+        facility=facility,
+        rules=rules,
+        start_time=start,
+        end_time=end,
+    )
+
     document: dict[str, Any] = {
         "_id": reservation_oid,
         "reference": reservation_reference(),
@@ -560,7 +554,8 @@ async def create_reservation(
         "startTime": start,
         "endTime": end,
         "status": ReservationStatus.CONFIRMED.value,
-        "estimatedAmount": _estimate_amount(facility, minutes),
+        "estimatedAmount": estimate.total if estimate else None,
+        "estimatedBreakdown": estimate.model_dump() if estimate else None,
         "checkedInAt": None,
         "checkedOutAt": None,
         "cancelledAt": None,
@@ -899,6 +894,15 @@ async def check_in(
             code=ReservationErrorCode.RESERVATION_NOT_ACTIVE,
         )
 
+    facility = await _facility(db, reservation["facilityId"])
+    rules = await pricing.active_rules(db, facility["_id"])
+    estimate = pricing.session_estimate(
+        facility=facility,
+        rules=rules,
+        entry_time=now,
+        scheduled_end_time=end,
+    )
+
     session_document: dict[str, Any] = {
         "_id": ObjectId(),
         "reservationId": reservation["_id"],
@@ -913,10 +917,14 @@ async def check_in(
         "spaceNumber": space.get("spaceNumber"),
         "entryTime": now,
         "exitTime": None,
+        "scheduledEndTime": end,
         "status": SessionStatus.ACTIVE.value,
         "durationMinutes": 0,
         "amount": None,
         "amountEstimated": True,
+        "estimatedAmount": estimate.total if estimate else None,
+        "estimatedBreakdown": estimate.model_dump() if estimate else None,
+        "pricingBreakdown": None,
         "overstayMinutes": 0,
         "closedById": _oid(closed_by_id),
         "createdAt": now,
@@ -1002,12 +1010,27 @@ async def _close_session_document(
     exit_time = now if now > entry else entry
     minutes = max(0, int((exit_time - entry).total_seconds() // 60))
     facility = await db[FACILITIES_COLLECTION].find_one({"_id": session["facilityId"]})
-    amount = _estimate_amount(facility, minutes) if facility is not None else None
-    overstay = 0
-    if reservation is not None:
-        end = _stored_utc(reservation.get("endTime"))
-        if end is not None and exit_time > end:
-            overstay = max(0, int((exit_time - end).total_seconds() // 60))
+    scheduled_end = _stored_utc(session.get("scheduledEndTime"))
+    if scheduled_end is None and reservation is not None:
+        scheduled_end = _stored_utc(reservation.get("endTime"))
+    scheduled_end = scheduled_end or exit_time
+    overstay = (
+        max(0, int((exit_time - scheduled_end).total_seconds() // 60))
+        if exit_time > scheduled_end
+        else 0
+    )
+
+    breakdown = None
+    if facility is not None:
+        rules = await pricing.active_rules(db, facility["_id"])
+        breakdown = pricing.session_final_price(
+            facility=facility,
+            rules=rules,
+            entry_time=entry,
+            exit_time=exit_time,
+            scheduled_end_time=scheduled_end,
+        )
+    amount = breakdown.total if breakdown else None
 
     updated_session = await db[SESSIONS_COLLECTION].find_one_and_update(
         {"_id": session["_id"], "status": status},
@@ -1017,7 +1040,8 @@ async def _close_session_document(
                 "exitTime": exit_time,
                 "durationMinutes": minutes,
                 "amount": amount,
-                "amountEstimated": True,
+                "amountEstimated": False,
+                "pricingBreakdown": breakdown.model_dump() if breakdown else None,
                 "overstayMinutes": overstay,
                 "closedById": _oid(closed_by_id),
                 "updatedAt": exit_time,
@@ -1184,6 +1208,219 @@ async def close_session(
     )
 
 
+async def extend_session(
+    db: AsyncDatabase,
+    *,
+    user_id: str,
+    role: Role,
+    facility_ids: frozenset[str],
+    session_id: str,
+    additional_minutes: int,
+    settings: Settings,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    session = await _load_visible_session(
+        db,
+        user_id=user_id,
+        role=role,
+        facility_ids=facility_ids,
+        session_id=session_id,
+    )
+    status = session.get("status")
+    if status not in (SessionStatus.ACTIVE.value, SessionStatus.EXTENDED.value):
+        raise ConflictError(
+            "Only an active parking session can be extended",
+            code=ReservationErrorCode.SESSION_NOT_ACTIVE,
+            details={"status": status},
+        )
+    if additional_minutes % settings.reservation_slot_minutes:
+        raise AppError(
+            f"additionalMinutes must be a multiple of {settings.reservation_slot_minutes}",
+            code=ErrorCode.VALIDATION_ERROR,
+            status_code=422,
+        )
+    if additional_minutes > settings.session_extension_max_minutes:
+        raise AppError(
+            "The extension is too long",
+            code=ReservationErrorCode.SESSION_EXTENSION_TOO_LONG,
+            status_code=422,
+            details={"maxMinutes": settings.session_extension_max_minutes},
+        )
+
+    reservation = await db[RESERVATIONS_COLLECTION].find_one(
+        {"_id": session["reservationId"]}
+    )
+    if reservation is None:
+        raise NotFoundError(RESERVATION_NOT_FOUND)
+
+    current_end = _stored_utc(session.get("scheduledEndTime"))
+    if current_end is None:
+        current_end = _stored_utc(reservation.get("endTime"))
+    if current_end is None:
+        raise ConflictError(
+            "This session has no scheduled end time",
+            code=ReservationErrorCode.SESSION_NOT_ACTIVE,
+        )
+
+    now = utcnow()
+    delta = timedelta(minutes=additional_minutes)
+    new_end = current_end + delta
+    reservation_start = _stored_utc(reservation.get("startTime")) or current_end
+    if new_end - reservation_start > timedelta(minutes=settings.reservation_max_minutes):
+        raise AppError(
+            f"A reservation may last at most {settings.reservation_max_minutes // 60} hours",
+            code=ReservationErrorCode.SESSION_EXTENSION_TOO_LONG,
+            status_code=422,
+        )
+
+    if await _space_has_conflict(
+        db,
+        space_id=session["spaceId"],
+        start=current_end,
+        end=new_end,
+        exclude_reservation_id=reservation["_id"],
+    ):
+        raise ConflictError(
+            "The space is already booked for the requested extension",
+            code=ReservationErrorCode.SESSION_EXTENSION_CONFLICT,
+        )
+
+    new_slot_starts = slot_starts(
+        current_end, new_end, settings.reservation_slot_minutes
+    )
+    try:
+        await db[RESERVATION_SLOTS_COLLECTION].insert_many(
+            [
+                {
+                    "_id": ObjectId(),
+                    "reservationId": reservation["_id"],
+                    "facilityId": reservation["facilityId"],
+                    "spaceId": session["spaceId"],
+                    "slotStart": slot_start,
+                }
+                for slot_start in new_slot_starts
+            ],
+            ordered=True,
+        )
+    except DuplicateKeyError:
+        await db[RESERVATION_SLOTS_COLLECTION].delete_many(
+            {
+                "reservationId": reservation["_id"],
+                "slotStart": {"$gte": current_end, "$lt": new_end},
+            }
+        )
+        raise ConflictError(
+            "The space is already booked for the requested extension",
+            code=ReservationErrorCode.SESSION_EXTENSION_CONFLICT,
+        ) from None
+
+    facility = await _facility(db, session["facilityId"])
+    rules = await pricing.active_rules(db, facility["_id"])
+    reservation_estimate = pricing.reservation_estimate(
+        facility=facility,
+        rules=rules,
+        start_time=reservation_start,
+        end_time=new_end,
+    )
+    updated_reservation = await db[RESERVATIONS_COLLECTION].find_one_and_update(
+        {
+            "_id": reservation["_id"],
+            "status": {
+                "$in": [
+                    ReservationStatus.ACTIVE.value,
+                    ReservationStatus.ARRIVED.value,
+                ]
+            },
+        },
+        {
+            "$set": {
+                "endTime": new_end,
+                "estimatedAmount": reservation_estimate.total
+                if reservation_estimate
+                else None,
+                "estimatedBreakdown": reservation_estimate.model_dump()
+                if reservation_estimate
+                else None,
+                "updatedAt": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated_reservation is None:
+        await db[RESERVATION_SLOTS_COLLECTION].delete_many(
+            {
+                "reservationId": reservation["_id"],
+                "slotStart": {"$gte": current_end, "$lt": new_end},
+            }
+        )
+        raise ConflictError(
+            "This reservation has already changed state",
+            code=ReservationErrorCode.RESERVATION_NOT_ACTIVE,
+        )
+
+    entry = _stored_utc(session.get("entryTime")) or now
+    session_estimate = pricing.session_estimate(
+        facility=facility,
+        rules=rules,
+        entry_time=entry,
+        scheduled_end_time=new_end,
+    )
+    overstay = (
+        max(0, int((now - new_end).total_seconds() // 60)) if now > new_end else 0
+    )
+    updated_session = await db[SESSIONS_COLLECTION].find_one_and_update(
+        {
+            "_id": session["_id"],
+            "status": {
+                "$in": [SessionStatus.ACTIVE.value, SessionStatus.EXTENDED.value]
+            },
+        },
+        {
+            "$set": {
+                "scheduledEndTime": new_end,
+                "status": SessionStatus.EXTENDED.value,
+                "durationMinutes": max(0, int((now - entry).total_seconds() // 60)),
+                "estimatedAmount": session_estimate.total if session_estimate else None,
+                "estimatedBreakdown": session_estimate.model_dump()
+                if session_estimate
+                else None,
+                "overstayMinutes": overstay,
+                "updatedAt": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if updated_session is None:
+        await db[RESERVATIONS_COLLECTION].update_one(
+            {"_id": reservation["_id"]},
+            {
+                "$set": {
+                    "endTime": reservation.get("endTime"),
+                    "estimatedAmount": reservation.get("estimatedAmount"),
+                    "estimatedBreakdown": reservation.get("estimatedBreakdown"),
+                    "updatedAt": now,
+                }
+            },
+        )
+        await db[RESERVATION_SLOTS_COLLECTION].delete_many(
+            {
+                "reservationId": reservation["_id"],
+                "slotStart": {"$gte": current_end, "$lt": new_end},
+            }
+        )
+        raise ConflictError(
+            "This parking session has already changed state",
+            code=ReservationErrorCode.SESSION_NOT_ACTIVE,
+        )
+
+    logger.info(
+        "Session %s extended by %d minutes to %s",
+        session["_id"],
+        additional_minutes,
+        new_end.isoformat(),
+    )
+    return updated_reservation, updated_session
+
+
 async def active_session(
     db: AsyncDatabase, *, user_id: str
 ) -> dict[str, Any] | None:
@@ -1292,6 +1529,7 @@ __all__ = [
     "check_out",
     "close_session",
     "create_reservation",
+    "extend_session",
     "get_reservation",
     "get_session",
     "list_reservations",

@@ -373,6 +373,9 @@ async def create_facility(
         "amenities": [amenity.value for amenity in payload.amenities],
         "hourlyRate": payload.hourlyRate,
         "dailyMax": payload.dailyMax,
+        "graceMinutes": payload.graceMinutes,
+        "overstayGraceMinutes": payload.overstayGraceMinutes,
+        "overstayRate": payload.overstayRate,
         "rating": payload.rating,
         "reviewCount": payload.reviewCount,
         "status": FacilityStatus.ACTIVE.value,
@@ -430,7 +433,15 @@ async def update_facility(
     ):
         if field_name in fields:
             updates[field_name] = getattr(payload, field_name)
-    for field_name in ("openingTime", "closingTime", "hourlyRate", "dailyMax"):
+    for field_name in (
+        "openingTime",
+        "closingTime",
+        "hourlyRate",
+        "dailyMax",
+        "graceMinutes",
+        "overstayGraceMinutes",
+        "overstayRate",
+    ):
         if field_name in fields:
             updates[field_name] = getattr(payload, field_name)
     if "open24h" in fields:

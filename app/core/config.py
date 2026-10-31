@@ -133,6 +133,12 @@ class Settings(BaseSettings):
     reservation_sweep_seconds: int = 60
     session_write_rate_limit: int = 120
     session_write_rate_window_seconds: int = 3600
+    session_extension_max_minutes: int = 24 * 60
+    pricing_write_rate_limit: int = 60
+    pricing_write_rate_window_seconds: int = 3600
+    pricing_max_rules_per_facility: int = 50
+    pricing_default_grace_minutes: int = 0
+    pricing_default_overstay_grace_minutes: int = 15
 
     # --- Password reset ---
     password_reset_expires_minutes: int = 30

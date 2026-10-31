@@ -378,15 +378,15 @@ async def check_in(
     summary="Check a reservation out",
     description=(
         "Staff only. Closes the session, returns the space to `AVAILABLE`, "
-        "releases the booking's slots and returns the duration and a base-rate "
-        "estimate (`amountEstimated: true`). Payments are a later module."
+        "releases the booking's slots and returns the final price and breakdown "
+        "(`amountEstimated: false`). Payments are a later module."
     ),
     responses=_RESERVATION_ERROR_RESPONSES,
 )
 async def check_out(
     reservation_id: str,
     request: Request,
-    user: Annotated[CurrentUser, Depends(require_roles(*_STAFF_ROLES))],
+    user: Annotated[CurrentUser, Depends(require_roles(Role.STAFF))],
     db: Annotated[AsyncDatabase, Depends(get_database)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CheckOutResponse:

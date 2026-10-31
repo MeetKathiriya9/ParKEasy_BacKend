@@ -9,10 +9,17 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import SessionStatus
 from app.schemas.common import PaginatedResponse
+from app.schemas.pricing import PricingBreakdown
+
+
+class ExtendSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    additionalMinutes: int = Field(gt=0, le=24 * 60)
 
 
 class SessionResponse(BaseModel):
@@ -29,10 +36,14 @@ class SessionResponse(BaseModel):
     spaceNumber: str
     entryTime: datetime
     exitTime: datetime | None = None
+    scheduledEndTime: datetime | None = None
     status: SessionStatus
     durationMinutes: int
     amount: float | None = None
     amountEstimated: bool = True
+    estimatedAmount: float | None = None
+    estimatedBreakdown: PricingBreakdown | None = None
+    pricingBreakdown: PricingBreakdown | None = None
     overstayMinutes: int = 0
     closedById: str | None = None
     createdAt: datetime
@@ -43,4 +54,4 @@ class SessionPage(PaginatedResponse[SessionResponse]):
     pass
 
 
-__all__ = ["SessionPage", "SessionResponse"]
+__all__ = ["ExtendSessionRequest", "SessionPage", "SessionResponse"]

@@ -188,6 +188,7 @@ class NotificationType(StrEnum):
 
 class PricingRuleType(StrEnum):
     HOURLY = "hourly"
+    FIXED = "fixed"
     DAILY = "daily"
     PEAK = "peak"
     EVENT = "event"

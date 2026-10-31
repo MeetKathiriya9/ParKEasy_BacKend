@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.enums import ReservationStatus
 from app.models.reservation import MAX_CANCEL_REASON_LENGTH
 from app.schemas.common import PaginatedResponse
+from app.schemas.pricing import PricingBreakdown
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -85,6 +86,7 @@ class ReservationResponse(BaseModel):
     durationMinutes: int
     status: ReservationStatus
     estimatedAmount: float | None = None
+    estimatedBreakdown: PricingBreakdown | None = None
     checkedInAt: datetime | None = None
     checkedOutAt: datetime | None = None
     cancelledAt: datetime | None = None
@@ -113,6 +115,11 @@ class CheckOutResponse(BaseModel):
     session: SessionResponse
 
 
+class ExtendSessionResponse(BaseModel):
+    reservation: ReservationResponse
+    session: SessionResponse
+
+
 class ReservationPage(PaginatedResponse[ReservationResponse]):
     pass
 
@@ -123,6 +130,7 @@ from app.schemas.session import SessionResponse  # noqa: E402
 
 CheckInResponse.model_rebuild()
 CheckOutResponse.model_rebuild()
+ExtendSessionResponse.model_rebuild()
 
 __all__ = [
     "CancelReservationRequest",
@@ -130,6 +138,7 @@ __all__ = [
     "CheckInResponse",
     "CheckOutResponse",
     "CreateReservationRequest",
+    "ExtendSessionResponse",
     "ReservationAvailabilityResponse",
     "ReservationPage",
     "ReservationResponse",

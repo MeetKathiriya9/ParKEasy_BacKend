@@ -152,6 +152,19 @@ INDEX_SPECS: dict[str, list[IndexModel]] = {
     ],
     "pricingRules": [
         IndexModel([("facilityId", ASCENDING), ("active", ASCENDING)], name="facility_active_1"),
+        IndexModel(
+            [("facilityId", ASCENDING), ("active", ASCENDING), ("priority", DESCENDING)],
+            name="facility_active_priority_1",
+        ),
+        IndexModel(
+            [("facilityId", ASCENDING), ("name", ASCENDING)],
+            unique=True,
+            name="uniq_facility_rule_name",
+        ),
+        IndexModel(
+            [("operatorId", ASCENDING), ("createdAt", DESCENDING)],
+            name="operator_created_1",
+        ),
     ],
     "occupancyLogs": [
         IndexModel(

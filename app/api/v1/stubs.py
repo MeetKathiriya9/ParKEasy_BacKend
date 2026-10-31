@@ -155,9 +155,9 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
         "sessions",
         "Active parking sessions",
         ("GET /active", "PATCH /{id}/extend", "POST /{id}/close"),
-        # Listing/reading/closing live in app/api/v1/sessions.py. Extension is
-        # still a 501 on its individual route because it needs pricing and slot
-        # re-claiming from later modules.
+        # Listing, reading, extension and closing live in
+        # app/api/v1/sessions.py; the pricing engine is in
+        # app/services/pricing.py.
         implemented=True,
     ),
     RouteGroupSpec(
@@ -169,6 +169,9 @@ ROUTE_GROUPS: tuple[RouteGroupSpec, ...] = (
         "pricing",
         "Pricing rules and rate preview",
         ("GET /rules", "POST /rules", "PATCH /rules/{id}", "POST /preview"),
+        # Rule CRUD, deletion and the preview live in
+        # app/api/v1/pricing.py; the calculator is in app/services/pricing.py.
+        implemented=True,
     ),
     RouteGroupSpec(
         "violations",
